@@ -89,13 +89,13 @@ def yahoo_fetch(ticker, range='1y'):
     raise Exception(last)
 
 def get_score_and_price(ticker):
-    data = yahoo_fetch(ticker, '3mo')
+    data = yahoo_fetch(ticker, '1y')  # 1 jaar nodig voor SMA200
     result = data['chart']['result'][0]
     raw_closes = result['indicators']['quote'][0]['close']
     timestamps = result['timestamp']
     closes = [v for v in raw_closes if v is not None]
     if len(closes) < 10:
-        return None, None, None
+        return None, None, None, None
     now = closes[-1]
     nowTs = timestamps[-1]
     def fc(days):
@@ -107,13 +107,24 @@ def get_score_and_price(ticker):
             if d < bd: bd=d; bi=i
         return raw_closes[bi]
     w1=fc(7); m1=fc(30); m3=fc(90)
-    if not w1 or not m1 or not m3: return None, None, None
+    if not w1 or not m1 or not m3: return None, None, None, None
     score = ((now-w1)/w1)*100*3 + ((now-m1)/m1)*100*2 + ((now-m3)/m3)*100*1
-    # Simpele kwaliteitscheck: is koers niet te ver boven SMA20?
+    # Kwaliteitscheck SMA20
     sma20 = sum(closes[-20:])/min(20,len(closes))
     above_sma = ((now-sma20)/sma20)*100
-    good_quality = above_sma < 10  # Niet meer dan 10% boven SMA20
-    return round(score, 1), round(now, 4), good_quality
+    good_quality = above_sma < 10
+    # Golden Cross detectie: SMA50 kruist SMA200
+    golden_cross = None
+    if len(closes) >= 200:
+        sma50_now = sum(closes[-50:])/50
+        sma200_now = sum(closes[-200:])/200
+        sma50_prev = sum(closes[-51:-1])/50
+        sma200_prev = sum(closes[-201:-1])/200
+        if sma50_prev <= sma200_prev and sma50_now > sma200_now:
+            golden_cross = 'golden'  # Golden Cross vandaag!
+        elif sma50_prev >= sma200_prev and sma50_now < sma200_now:
+            golden_cross = 'death'   # Death Cross vandaag
+    return round(score, 1), round(now, 4), good_quality, golden_cross
 
 # ── Telegram ──────────────────────────────────────────────────────
 def send_telegram(msg):
@@ -202,10 +213,22 @@ def monitor_loop():
                 today = datetime.utcnow().strftime('%Y-%m-%d')
                 for ticker in WATCHLIST:
                     try:
-                        score, koers, good_quality = get_score_and_price(ticker)
+                            score, koers, good_quality, golden_cross = get_score_and_price(ticker)
                         if score is None:
                             time.sleep(2)
                             continue
+
+                        # Golden Cross melding
+                        if golden_cross == 'golden':
+                            key = f'{ticker}-goldencross-{today}'
+                            if key not in sent:
+                                if send_telegram(f'⭐ GOLDEN CROSS: {ticker}\nSMA50 kruist SMA200 omhoog!\nKoers: {koers}\nScore: {score}\n\nHistorisch sterk koopsignaal!'):
+                                    sent.add(key); save_sent(sent)
+                        elif golden_cross == 'death':
+                            key = f'{ticker}-deathcross-{today}'
+                            if key not in sent:
+                                if send_telegram(f'☠️ DEATH CROSS: {ticker}\nSMA50 kruist SMA200 omlaag!\nKoers: {koers}\nScore: {score}\n\nWaarschuwingssignaal!'):
+                                    sent.add(key); save_sent(sent)
 
                         # Telegram signalen
                         if score > 100 and good_quality:
@@ -224,7 +247,6 @@ def monitor_loop():
 
                         # Papier handel
                         pt_auto_trade(ticker, score, koers, good_quality)
-
                         time.sleep(3)
                     except Exception as e:
                         print(f'Fout {ticker}: {e}')
