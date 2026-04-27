@@ -1,27 +1,74 @@
 #!/usr/bin/env python3
 """
-Momentum Scanner - Server voor Render.com
+Momentum Scanner - Cloud Server voor Render.com
+24/7 koersen, Telegram meldingen EN papier handel
 """
 
 import json
 import gzip
 import ssl
 import os
+import time
+import threading
 import urllib.request
 import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+from datetime import datetime
 
-# Render gebruikt een PORT environment variable
 PORT = int(os.environ.get('PORT', 8765))
+TG_TOKEN = os.environ.get('TG_TOKEN', '')
+TG_CHAT = os.environ.get('TG_CHAT', '')
+PT_FILE = '/tmp/papier_handel.json'
+SENT_FILE = '/tmp/sent_signals.json'
 
-# SSL uitschakelen voor compatibiliteit
 ssl_ctx = ssl._create_unverified_context()
 
-def yahoo_fetch(ticker):
+WATCHLIST = [
+    'ASML.AS','SHELL.AS','INGA.AS','HEIA.AS','ADYEN.AS','PHIA.AS','ASRNL.AS',
+    'ABN.AS','AGN.AS','AD.AS','AKZA.AS','BESI.AS','DSFIR.AS','EXO.AS','HLAG.DE',
+    'IMCD.AS','KPN.AS','MT.AS','NN.AS','RAND.AS','REN.AS','PRX.AS','UNA.AS',
+    'VPK.AS','WKL.AS','NVDA','AAPL','MSFT','GOOG','AMZN','AVGO','META','TSLA',
+    'BRK-B','WMT','JPM','LLY','V','ORCL','MA','NFLX','JNJ','COST','BAC',
+    'ABBV','XOM','AMD','CRM','PG','GE','KO','PLTR','MCD','IBM','GS','UBER'
+]
+
+PT_BUDGET = 10000
+
+# ── Bestand helpers ───────────────────────────────────────────────
+def load_pt():
+    try:
+        with open(PT_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return {'active': False, 'startDate': None, 'startKapitaal': PT_BUDGET, 'posities': [], 'log': []}
+
+def save_pt(pt):
+    try:
+        with open(PT_FILE, 'w') as f:
+            json.dump(pt, f)
+    except Exception as e:
+        print(f'PT opslaan fout: {e}')
+
+def load_sent():
+    try:
+        with open(SENT_FILE, 'r') as f:
+            return set(json.load(f))
+    except:
+        return set()
+
+def save_sent(sent):
+    try:
+        with open(SENT_FILE, 'w') as f:
+            json.dump(list(sent), f)
+    except:
+        pass
+
+# ── Yahoo Finance ─────────────────────────────────────────────────
+def yahoo_fetch(ticker, range='1y'):
     urls = [
-        f'https://query1.finance.yahoo.com/v8/finance/chart/{urllib.request.quote(ticker)}?interval=1d&range=1y',
-        f'https://query2.finance.yahoo.com/v8/finance/chart/{urllib.request.quote(ticker)}?interval=1d&range=1y',
+        f'https://query1.finance.yahoo.com/v8/finance/chart/{urllib.request.quote(ticker)}?interval=1d&range={range}',
+        f'https://query2.finance.yahoo.com/v8/finance/chart/{urllib.request.quote(ticker)}?interval=1d&range={range}',
     ]
     last = 'onbekend'
     for url in urls:
@@ -41,6 +88,155 @@ def yahoo_fetch(ticker):
             continue
     raise Exception(last)
 
+def get_score_and_price(ticker):
+    data = yahoo_fetch(ticker, '3mo')
+    result = data['chart']['result'][0]
+    raw_closes = result['indicators']['quote'][0]['close']
+    timestamps = result['timestamp']
+    closes = [v for v in raw_closes if v is not None]
+    if len(closes) < 10:
+        return None, None, None
+    now = closes[-1]
+    nowTs = timestamps[-1]
+    def fc(days):
+        t = nowTs - days*86400
+        bi = 0; bd = float('inf')
+        for i, ts in enumerate(timestamps):
+            if raw_closes[i] is None: continue
+            d = abs(ts-t)
+            if d < bd: bd=d; bi=i
+        return raw_closes[bi]
+    w1=fc(7); m1=fc(30); m3=fc(90)
+    if not w1 or not m1 or not m3: return None, None, None
+    score = ((now-w1)/w1)*100*3 + ((now-m1)/m1)*100*2 + ((now-m3)/m3)*100*1
+    # Simpele kwaliteitscheck: is koers niet te ver boven SMA20?
+    sma20 = sum(closes[-20:])/min(20,len(closes))
+    above_sma = ((now-sma20)/sma20)*100
+    good_quality = above_sma < 10  # Niet meer dan 10% boven SMA20
+    return round(score, 1), round(now, 4), good_quality
+
+# ── Telegram ──────────────────────────────────────────────────────
+def send_telegram(msg):
+    if not TG_TOKEN or not TG_CHAT:
+        return False
+    try:
+        url = f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage'
+        body = json.dumps({'chat_id': TG_CHAT, 'text': msg}).encode('utf-8')
+        req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as resp:
+            result = json.loads(resp.read())
+            return result.get('ok', False)
+    except Exception as e:
+        print(f'Telegram fout: {e}')
+        return False
+
+# ── Beurstijd check ───────────────────────────────────────────────
+def is_beurstijd():
+    now = datetime.utcnow()
+    if now.weekday() >= 5: return False
+    tijd = now.hour * 60 + now.minute
+    return (7*60 <= tijd <= 15*60+35) or (13*60+30 <= tijd <= 20*60)
+
+# ── Papier handel logica ──────────────────────────────────────────
+def pt_auto_trade(ticker, score, koers, good_quality):
+    pt = load_pt()
+    if not pt['active']: return
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+
+    # Koop signaal
+    if score > 100 and good_quality:
+        # Kijk of al in bezit
+        al_bezit = any(p['ticker'] == ticker and p['open'] for p in pt['posities'])
+        if not al_bezit:
+            # Bereken hoeveel posities open staan
+            open_pos = len([p for p in pt['posities'] if p['open']])
+            max_pos = 10  # Maximaal 10 posities tegelijk
+            if open_pos < max_pos:
+                bedrag = PT_BUDGET / max_pos
+                aandelen = int(bedrag / koers)
+                if aandelen >= 1:
+                    pos = {
+                        'ticker': ticker,
+                        'aankoopKoers': koers,
+                        'aankoopDatum': today,
+                        'aandelen': aandelen,
+                        'aankoopScore': score,
+                        'open': True
+                    }
+                    pt['posities'].append(pos)
+                    pt['log'].insert(0, {
+                        'datum': today, 'type': 'koop',
+                        'ticker': ticker, 'koers': koers,
+                        'aandelen': aandelen, 'score': score
+                    })
+                    save_pt(pt)
+                    send_telegram(f'🟢 PAPIER KOOP: {ticker}\nScore: {score} · Kwaliteit: ✅\nKoers: {koers}\nAandelen: {aandelen}\nWaarde: €{round(aandelen*koers,2)}')
+                    print(f'PT Koop: {ticker} @ {koers}')
+
+    # Verkoop signaal
+    elif score < 50:
+        for pos in pt['posities']:
+            if pos['ticker'] == ticker and pos['open']:
+                pos['open'] = False
+                pos['verkoopKoers'] = koers
+                pos['verkoopDatum'] = today
+                pos['rendement'] = round(((koers - pos['aankoopKoers']) / pos['aankoopKoers']) * 100, 2)
+                pos['winst'] = round((koers - pos['aankoopKoers']) * pos['aandelen'], 2)
+                pt['log'].insert(0, {
+                    'datum': today, 'type': 'verkoop',
+                    'ticker': ticker, 'koers': koers,
+                    'rendement': pos['rendement'], 'winst': pos['winst']
+                })
+                save_pt(pt)
+                send_telegram(f'📉 PAPIER VERKOOP: {ticker}\nScore: {score} (verkoopzone)\nKoers: {koers}\nRendement: {pos["rendement"]}%\nWinst/Verlies: €{pos["winst"]}')
+                print(f'PT Verkoop: {ticker} @ {koers}')
+
+# ── Monitor loop ──────────────────────────────────────────────────
+def monitor_loop():
+    print('Monitor loop gestart')
+    sent = load_sent()
+    while True:
+        try:
+            if is_beurstijd():
+                print(f'Controle: {datetime.utcnow().strftime("%H:%M UTC")} — {len(WATCHLIST)} aandelen')
+                today = datetime.utcnow().strftime('%Y-%m-%d')
+                for ticker in WATCHLIST:
+                    try:
+                        score, koers, good_quality = get_score_and_price(ticker)
+                        if score is None:
+                            time.sleep(2)
+                            continue
+
+                        # Telegram signalen
+                        if score > 100 and good_quality:
+                            key = f'{ticker}-buy-{today}'
+                            if key not in sent:
+                                if send_telegram(f'🟢 KOOPSIGNAAL: {ticker}\nScore: {score}\nKoers: {koers}'):
+                                    sent.add(key)
+                                    save_sent(sent)
+                        elif score < 60:
+                            key = f'{ticker}-sell-{today}'
+                            if key not in sent:
+                                label = 'VERKOOPSIGNAAL' if score < 50 else 'WAARSCHUWING'
+                                if send_telegram(f'📉 {label}: {ticker}\nScore: {score}\nKoers: {koers}'):
+                                    sent.add(key)
+                                    save_sent(sent)
+
+                        # Papier handel
+                        pt_auto_trade(ticker, score, koers, good_quality)
+
+                        time.sleep(3)
+                    except Exception as e:
+                        print(f'Fout {ticker}: {e}')
+                        time.sleep(3)
+                print(f'Controle klaar')
+            else:
+                print(f'Beurzen gesloten: {datetime.utcnow().strftime("%H:%M UTC")}')
+        except Exception as e:
+            print(f'Monitor fout: {e}')
+        time.sleep(15 * 60)
+
+# ── HTTP Handler ──────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
@@ -58,14 +254,14 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
 
         if parsed.path == '/ping':
-            self.respond(200, {'status': 'ok', 'message': 'Momentum Scanner Server draait!'})
+            self.respond(200, {'status': 'ok', 'beurstijd': is_beurstijd()})
 
         elif parsed.path == '/quote':
             ticker = params.get('ticker', [''])[0]
             if not ticker:
                 self.respond(400, {'error': 'Geen ticker'}); return
             try:
-                data = yahoo_fetch(ticker)
+                data = yahoo_fetch(ticker, '1y')
                 result = data['chart']['result'][0]
                 closes = [v if v is not None else None for v in result['indicators']['quote'][0]['close']]
                 timestamps = result['timestamp']
@@ -89,8 +285,7 @@ class Handler(BaseHTTPRequestHandler):
                     'm': ((now-m1)/m1)*100 if m1 else None,
                     'm3': ((now-m3)/m3)*100 if m3 else None,
                     'd2': ((now-d2)/d2)*100 if d2 else None,
-                    'closes': closes,
-                    'timestamps': timestamps
+                    'closes': closes, 'timestamps': timestamps
                 })
             except Exception as e:
                 self.respond(500, {'error': str(e)})
@@ -100,8 +295,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 url = f'https://query1.finance.yahoo.com/v10/finance/quoteSummary/{urllib.request.quote(ticker)}?modules=incomeStatementHistory'
                 req = urllib.request.Request(url, headers={
-                    'User-Agent': 'Mozilla/5.0',
-                    'Accept': 'application/json',
+                    'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json',
                     'Referer': 'https://finance.yahoo.com/'
                 })
                 with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
@@ -111,7 +305,6 @@ class Handler(BaseHTTPRequestHandler):
                     data = json.loads(text)
                 stmts = data['quoteSummary']['result'][0]['incomeStatementHistory']['incomeStatementHistory']
                 rev, net, years = [], [], []
-                from datetime import datetime
                 for s in reversed(stmts):
                     years.append(datetime.fromtimestamp(s['endDate']['raw']).year)
                     rev.append((s.get('totalRevenue',{}).get('raw',0) or 0)/1e9)
@@ -119,6 +312,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'rev': rev, 'net': net, 'years': years})
             except:
                 self.respond(200, {'rev': [], 'net': [], 'years': []})
+
+        elif parsed.path == '/pt':
+            # Papier handel status ophalen
+            pt = load_pt()
+            # Bereken huidige waarde
+            waarde = 0
+            geInvesteerd = sum(p['aankoopKoers']*p['aandelen'] for p in pt['posities'] if p['open'])
+            geslotenWinst = sum(p.get('winst',0) for p in pt['posities'] if not p['open'])
+            waarde = (PT_BUDGET - geInvesteerd) + geInvesteerd + geslotenWinst
+            pt['huidigeWaarde'] = round(waarde, 2)
+            pt['pnl'] = round(waarde - PT_BUDGET, 2)
+            self.respond(200, pt)
+
+        elif parsed.path == '/pt/start':
+            pt = {'active': True, 'startDate': datetime.utcnow().strftime('%Y-%m-%d'),
+                  'startKapitaal': PT_BUDGET, 'posities': [], 'log': []}
+            save_pt(pt)
+            send_telegram('📊 Papier handel gestart!\nBudget: €10.000\nDe server handelt automatisch tijdens beursuren.')
+            self.respond(200, {'status': 'gestart'})
+
+        elif parsed.path == '/pt/stop':
+            pt = load_pt()
+            pt['active'] = False
+            save_pt(pt)
+            self.respond(200, {'status': 'gestopt'})
+
         else:
             self.respond(404, {'error': 'Niet gevonden'})
 
@@ -132,9 +351,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 if __name__ == '__main__':
-    # Render luistert op 0.0.0.0, niet localhost
+    t = threading.Thread(target=monitor_loop, daemon=True)
+    t.start()
     server = HTTPServer(('0.0.0.0', PORT), Handler)
     print(f"Momentum Scanner Server draait op port {PORT}")
+    print(f"Telegram: {'Actief' if TG_TOKEN else 'Niet ingesteld'}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
