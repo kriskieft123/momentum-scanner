@@ -35,7 +35,6 @@ WATCHLIST = [
 
 PT_BUDGET = 10000
 
-# ── Bestand helpers ───────────────────────────────────────────────
 def load_pt():
     try:
         with open(PT_FILE, 'r') as f:
@@ -64,11 +63,10 @@ def save_sent(sent):
     except:
         pass
 
-# ── Yahoo Finance ─────────────────────────────────────────────────
-def yahoo_fetch(ticker, range='1y'):
+def yahoo_fetch(ticker, rng='1y'):
     urls = [
-        f'https://query1.finance.yahoo.com/v8/finance/chart/{urllib.request.quote(ticker)}?interval=1d&range={range}',
-        f'https://query2.finance.yahoo.com/v8/finance/chart/{urllib.request.quote(ticker)}?interval=1d&range={range}',
+        f'https://query1.finance.yahoo.com/v8/finance/chart/{urllib.request.quote(ticker)}?interval=1d&range={rng}',
+        f'https://query2.finance.yahoo.com/v8/finance/chart/{urllib.request.quote(ticker)}?interval=1d&range={rng}',
     ]
     last = 'onbekend'
     for url in urls:
@@ -89,7 +87,7 @@ def yahoo_fetch(ticker, range='1y'):
     raise Exception(last)
 
 def get_score_and_price(ticker):
-    data = yahoo_fetch(ticker, '1y')  # 1 jaar nodig voor SMA200
+    data = yahoo_fetch(ticker, '1y')
     result = data['chart']['result'][0]
     raw_closes = result['indicators']['quote'][0]['close']
     timestamps = result['timestamp']
@@ -107,13 +105,12 @@ def get_score_and_price(ticker):
             if d < bd: bd=d; bi=i
         return raw_closes[bi]
     w1=fc(7); m1=fc(30); m3=fc(90)
-    if not w1 or not m1 or not m3: return None, None, None, None
+    if not w1 or not m1 or not m3:
+        return None, None, None, None
     score = ((now-w1)/w1)*100*3 + ((now-m1)/m1)*100*2 + ((now-m3)/m3)*100*1
-    # Kwaliteitscheck SMA20
     sma20 = sum(closes[-20:])/min(20,len(closes))
     above_sma = ((now-sma20)/sma20)*100
     good_quality = above_sma < 10
-    # Golden Cross detectie: SMA50 kruist SMA200
     golden_cross = None
     if len(closes) >= 200:
         sma50_now = sum(closes[-50:])/50
@@ -121,12 +118,11 @@ def get_score_and_price(ticker):
         sma50_prev = sum(closes[-51:-1])/50
         sma200_prev = sum(closes[-201:-1])/200
         if sma50_prev <= sma200_prev and sma50_now > sma200_now:
-            golden_cross = 'golden'  # Golden Cross vandaag!
+            golden_cross = 'golden'
         elif sma50_prev >= sma200_prev and sma50_now < sma200_now:
-            golden_cross = 'death'   # Death Cross vandaag
+            golden_cross = 'death'
     return round(score, 1), round(now, 4), good_quality, golden_cross
 
-# ── Telegram ──────────────────────────────────────────────────────
 def send_telegram(msg):
     if not TG_TOKEN or not TG_CHAT:
         return False
@@ -141,29 +137,24 @@ def send_telegram(msg):
         print(f'Telegram fout: {e}')
         return False
 
-# ── Beurstijd check ───────────────────────────────────────────────
 def is_beurstijd():
     now = datetime.utcnow()
-    if now.weekday() >= 5: return False
+    if now.weekday() >= 5:
+        return False
     tijd = now.hour * 60 + now.minute
     return (7*60 <= tijd <= 15*60+35) or (13*60+30 <= tijd <= 20*60)
 
-# ── Papier handel logica ──────────────────────────────────────────
 def pt_auto_trade(ticker, score, koers, good_quality):
     pt = load_pt()
-    if not pt['active']: return
+    if not pt['active']:
+        return
     today = datetime.utcnow().strftime('%Y-%m-%d')
-
-    # Koop signaal
     if score > 100 and good_quality:
-        # Kijk of al in bezit
         al_bezit = any(p['ticker'] == ticker and p['open'] for p in pt['posities'])
         if not al_bezit:
-            # Bereken hoeveel posities open staan
             open_pos = len([p for p in pt['posities'] if p['open']])
-            max_pos = 10  # Maximaal 10 posities tegelijk
-            if open_pos < max_pos:
-                bedrag = PT_BUDGET / max_pos
+            if open_pos < 10:
+                bedrag = PT_BUDGET / 10
                 aandelen = int(bedrag / koers)
                 if aandelen >= 1:
                     pos = {
@@ -175,16 +166,10 @@ def pt_auto_trade(ticker, score, koers, good_quality):
                         'open': True
                     }
                     pt['posities'].append(pos)
-                    pt['log'].insert(0, {
-                        'datum': today, 'type': 'koop',
-                        'ticker': ticker, 'koers': koers,
-                        'aandelen': aandelen, 'score': score
-                    })
+                    pt['log'].insert(0, {'datum': today, 'type': 'koop', 'ticker': ticker, 'koers': koers, 'aandelen': aandelen, 'score': score})
                     save_pt(pt)
-                    send_telegram(f'🟢 PAPIER KOOP: {ticker}\nScore: {score} · Kwaliteit: ✅\nKoers: {koers}\nAandelen: {aandelen}\nWaarde: €{round(aandelen*koers,2)}')
+                    send_telegram(f'🟢 PAPIER KOOP: {ticker}\nScore: {score}\nKoers: {koers}\nAandelen: {aandelen}')
                     print(f'PT Koop: {ticker} @ {koers}')
-
-    # Verkoop signaal
     elif score < 50:
         for pos in pt['posities']:
             if pos['ticker'] == ticker and pos['open']:
@@ -193,32 +178,26 @@ def pt_auto_trade(ticker, score, koers, good_quality):
                 pos['verkoopDatum'] = today
                 pos['rendement'] = round(((koers - pos['aankoopKoers']) / pos['aankoopKoers']) * 100, 2)
                 pos['winst'] = round((koers - pos['aankoopKoers']) * pos['aandelen'], 2)
-                pt['log'].insert(0, {
-                    'datum': today, 'type': 'verkoop',
-                    'ticker': ticker, 'koers': koers,
-                    'rendement': pos['rendement'], 'winst': pos['winst']
-                })
+                pt['log'].insert(0, {'datum': today, 'type': 'verkoop', 'ticker': ticker, 'koers': koers, 'rendement': pos['rendement'], 'winst': pos['winst']})
                 save_pt(pt)
-                send_telegram(f'📉 PAPIER VERKOOP: {ticker}\nScore: {score} (verkoopzone)\nKoers: {koers}\nRendement: {pos["rendement"]}%\nWinst/Verlies: €{pos["winst"]}')
+                send_telegram(f'📉 PAPIER VERKOOP: {ticker}\nScore: {score}\nKoers: {koers}\nRendement: {pos["rendement"]}%\nWinst: €{pos["winst"]}')
                 print(f'PT Verkoop: {ticker} @ {koers}')
 
-# ── Monitor loop ──────────────────────────────────────────────────
 def monitor_loop():
     print('Monitor loop gestart')
     sent = load_sent()
     while True:
         try:
             if is_beurstijd():
-                print(f'Controle: {datetime.utcnow().strftime("%H:%M UTC")} — {len(WATCHLIST)} aandelen')
+                print(f'Controle: {datetime.utcnow().strftime("%H:%M UTC")}')
                 today = datetime.utcnow().strftime('%Y-%m-%d')
                 for ticker in WATCHLIST:
                     try:
-                            score, koers, good_quality, golden_cross = get_score_and_price(ticker)
+                        score, koers, good_quality, golden_cross = get_score_and_price(ticker)
                         if score is None:
                             time.sleep(2)
                             continue
-
-                        # Golden Cross melding
+                        # Golden Cross
                         if golden_cross == 'golden':
                             key = f'{ticker}-goldencross-{today}'
                             if key not in sent:
@@ -229,36 +208,31 @@ def monitor_loop():
                             if key not in sent:
                                 if send_telegram(f'☠️ DEATH CROSS: {ticker}\nSMA50 kruist SMA200 omlaag!\nKoers: {koers}\nScore: {score}\n\nWaarschuwingssignaal!'):
                                     sent.add(key); save_sent(sent)
-
-                        # Telegram signalen
+                        # Koop/verkoop signalen
                         if score > 100 and good_quality:
                             key = f'{ticker}-buy-{today}'
                             if key not in sent:
                                 if send_telegram(f'🟢 KOOPSIGNAAL: {ticker}\nScore: {score}\nKoers: {koers}'):
-                                    sent.add(key)
-                                    save_sent(sent)
+                                    sent.add(key); save_sent(sent)
                         elif score < 60:
                             key = f'{ticker}-sell-{today}'
                             if key not in sent:
                                 label = 'VERKOOPSIGNAAL' if score < 50 else 'WAARSCHUWING'
                                 if send_telegram(f'📉 {label}: {ticker}\nScore: {score}\nKoers: {koers}'):
-                                    sent.add(key)
-                                    save_sent(sent)
-
+                                    sent.add(key); save_sent(sent)
                         # Papier handel
                         pt_auto_trade(ticker, score, koers, good_quality)
                         time.sleep(3)
                     except Exception as e:
                         print(f'Fout {ticker}: {e}')
                         time.sleep(3)
-                print(f'Controle klaar')
+                print('Controle klaar')
             else:
                 print(f'Beurzen gesloten: {datetime.utcnow().strftime("%H:%M UTC")}')
         except Exception as e:
             print(f'Monitor fout: {e}')
         time.sleep(15 * 60)
 
-# ── HTTP Handler ──────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
@@ -336,10 +310,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'rev': [], 'net': [], 'years': []})
 
         elif parsed.path == '/pt':
-            # Papier handel status ophalen
             pt = load_pt()
-            # Bereken huidige waarde
-            waarde = 0
             geInvesteerd = sum(p['aankoopKoers']*p['aandelen'] for p in pt['posities'] if p['open'])
             geslotenWinst = sum(p.get('winst',0) for p in pt['posities'] if not p['open'])
             waarde = (PT_BUDGET - geInvesteerd) + geInvesteerd + geslotenWinst
