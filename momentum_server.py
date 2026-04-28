@@ -24,6 +24,13 @@ SENT_FILE = '/tmp/sent_signals.json'
 
 ssl_ctx = ssl._create_unverified_context()
 
+AEX = [
+    'ASML.AS','SHELL.AS','INGA.AS','HEIA.AS','ADYEN.AS','PHIA.AS','ASRNL.AS',
+    'ABN.AS','AGN.AS','AD.AS','AKZA.AS','BESI.AS','DSFIR.AS','EXO.AS','HLAG.DE',
+    'IMCD.AS','KPN.AS','MT.AS','NN.AS','RAND.AS','REN.AS','PRX.AS','UNA.AS',
+    'VPK.AS','WKL.AS'
+]
+
 WATCHLIST = [
     'ASML.AS','SHELL.AS','INGA.AS','HEIA.AS','ADYEN.AS','PHIA.AS','ASRNL.AS',
     'ABN.AS','AGN.AS','AD.AS','AKZA.AS','BESI.AS','DSFIR.AS','EXO.AS','HLAG.DE',
@@ -111,17 +118,7 @@ def get_score_and_price(ticker):
     sma20 = sum(closes[-20:])/min(20,len(closes))
     above_sma = ((now-sma20)/sma20)*100
     good_quality = above_sma < 10
-    golden_cross = None
-    if len(closes) >= 200:
-        sma50_now = sum(closes[-50:])/50
-        sma200_now = sum(closes[-200:])/200
-        sma50_prev = sum(closes[-51:-1])/50
-        sma200_prev = sum(closes[-201:-1])/200
-        if sma50_prev <= sma200_prev and sma50_now > sma200_now:
-            golden_cross = 'golden'
-        elif sma50_prev >= sma200_prev and sma50_now < sma200_now:
-            golden_cross = 'death'
-    return round(score, 1), round(now, 4), good_quality, golden_cross
+    return round(score, 1), round(now, 4), good_quality
 
 def send_telegram(msg):
     if not TG_TOKEN or not TG_CHAT:
@@ -137,12 +134,26 @@ def send_telegram(msg):
         print(f'Telegram fout: {e}')
         return False
 
-def is_beurstijd():
+def is_aex_open():
     now = datetime.utcnow()
-    if now.weekday() >= 5:
-        return False
+    if now.weekday() >= 5: return False
     tijd = now.hour * 60 + now.minute
-    return (7*60 <= tijd <= 15*60+35) or (13*60+30 <= tijd <= 20*60)
+    return 7*60 <= tijd <= 15*60+35  # 09:00-17:35 NL = 07:00-15:35 UTC
+
+def is_nyse_open():
+    now = datetime.utcnow()
+    if now.weekday() >= 5: return False
+    tijd = now.hour * 60 + now.minute
+    return 13*60+30 <= tijd <= 20*60  # 15:30-22:00 NL = 13:30-20:00 UTC
+
+def is_beurstijd():
+    return is_aex_open() or is_nyse_open()
+
+def beurs_voor_ticker(ticker):
+    # AEX en Frankfurt
+    if ticker.endswith('.AS') or ticker.endswith('.DE') or ticker.endswith('.L'):
+        return 'aex'
+    return 'nyse'
 
 def pt_auto_trade(ticker, score, koers, good_quality):
     pt = load_pt()
@@ -193,28 +204,22 @@ def monitor_loop():
                 today = datetime.utcnow().strftime('%Y-%m-%d')
                 for ticker in WATCHLIST:
                     try:
-                        score, koers, good_quality, golden_cross = get_score_and_price(ticker)
+                        score, koers, good_quality = get_score_and_price(ticker)
                         if score is None:
                             time.sleep(2)
                             continue
-                        # Golden Cross
-                        if golden_cross == 'golden':
-                            key = f'{ticker}-goldencross-{today}'
-                            if key not in sent:
-                                if send_telegram(f'⭐ GOLDEN CROSS: {ticker}\nSMA50 kruist SMA200 omhoog!\nKoers: {koers}\nScore: {score}\n\nHistorisch sterk koopsignaal!'):
-                                    sent.add(key); save_sent(sent)
-                        elif golden_cross == 'death':
-                            key = f'{ticker}-deathcross-{today}'
-                            if key not in sent:
-                                if send_telegram(f'☠️ DEATH CROSS: {ticker}\nSMA50 kruist SMA200 omlaag!\nKoers: {koers}\nScore: {score}\n\nWaarschuwingssignaal!'):
-                                    sent.add(key); save_sent(sent)
-                        # Koop/verkoop signalen
-                        if score > 100 and good_quality:
+                        # Bepaal of beurs van dit aandeel open is
+                        beurs = beurs_voor_ticker(ticker)
+                        beurs_open = is_aex_open() if beurs == 'aex' else is_nyse_open()
+
+                        # Koop signalen — alleen als beurs open is
+                        if score > 100 and good_quality and beurs_open:
                             key = f'{ticker}-buy-{today}'
                             if key not in sent:
                                 if send_telegram(f'🟢 KOOPSIGNAAL: {ticker}\nScore: {score}\nKoers: {koers}'):
                                     sent.add(key); save_sent(sent)
-                        elif score < 60:
+                        # Verkoop signalen — alleen AEX én alleen als AEX open is
+                        elif score < 60 and ticker in AEX and is_aex_open():
                             key = f'{ticker}-sell-{today}'
                             if key not in sent:
                                 label = 'VERKOOPSIGNAAL' if score < 50 else 'WAARSCHUWING'
