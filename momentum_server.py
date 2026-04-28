@@ -19,10 +19,60 @@ from datetime import datetime
 PORT = int(os.environ.get('PORT', 8765))
 TG_TOKEN = os.environ.get('TG_TOKEN', '')
 TG_CHAT = os.environ.get('TG_CHAT', '')
-PT_FILE = '/tmp/papier_handel.json'
+JSONBIN_KEY = os.environ.get('JSONBIN_KEY', '$2a$10$jqh5XzlIIwgHC86WtPuvN.zwUqrmJJnMTvYB0jyL5Mp88iEICOkze')
+JSONBIN_PT_ID = os.environ.get('JSONBIN_PT_ID', '')  # wordt ingesteld na eerste keer
 SENT_FILE = '/tmp/sent_signals.json'
 
 ssl_ctx = ssl._create_unverified_context()
+
+def jsonbin_request(method, path, data=None):
+    url = f'https://api.jsonbin.io/v3{path}'
+    headers = {
+        'X-Master-Key': JSONBIN_KEY,
+        'Content-Type': 'application/json'
+    }
+    body = json.dumps(data).encode('utf-8') if data else None
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
+        return json.loads(resp.read().decode('utf-8'))
+
+def load_pt():
+    global JSONBIN_PT_ID
+    try:
+        if not JSONBIN_PT_ID:
+            # Zoek bestaande bin
+            result = jsonbin_request('GET', '/b?meta=false')
+            for b in result if isinstance(result, list) else []:
+                if b.get('record', {}).get('_type') == 'momentum_pt':
+                    JSONBIN_PT_ID = b['metadata']['id']
+                    return b['record']
+            return {'active': False, 'startDate': None, 'startKapitaal': PT_BUDGET, 'posities': [], 'log': [], '_type': 'momentum_pt'}
+        result = jsonbin_request('GET', f'/b/{JSONBIN_PT_ID}/latest')
+        return result.get('record', {'active': False, 'startDate': None, 'startKapitaal': PT_BUDGET, 'posities': [], 'log': []})
+    except Exception as e:
+        print(f'JSONBin load fout: {e}')
+        return {'active': False, 'startDate': None, 'startKapitaal': PT_BUDGET, 'posities': [], 'log': []}
+
+def save_pt(pt):
+    global JSONBIN_PT_ID
+    try:
+        pt['_type'] = 'momentum_pt'
+        if not JSONBIN_PT_ID:
+            # Maak nieuwe bin aan
+            result = jsonbin_request('POST', '/b', pt)
+            JSONBIN_PT_ID = result['metadata']['id']
+            print(f'JSONBin aangemaakt: {JSONBIN_PT_ID}')
+        else:
+            jsonbin_request('PUT', f'/b/{JSONBIN_PT_ID}', pt)
+        print('PT opgeslagen in JSONBin')
+    except Exception as e:
+        print(f'JSONBin save fout: {e}')
+        # Fallback naar bestand
+        try:
+            with open('/tmp/papier_handel.json', 'w') as f:
+                json.dump(pt, f)
+        except:
+            pass
 
 AEX = [
     'ASML.AS','SHELL.AS','INGA.AS','HEIA.AS','ADYEN.AS','PHIA.AS','ASRNL.AS',
@@ -41,20 +91,6 @@ WATCHLIST = [
 ]
 
 PT_BUDGET = 10000
-
-def load_pt():
-    try:
-        with open(PT_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return {'active': False, 'startDate': None, 'startKapitaal': PT_BUDGET, 'posities': [], 'log': []}
-
-def save_pt(pt):
-    try:
-        with open(PT_FILE, 'w') as f:
-            json.dump(pt, f)
-    except Exception as e:
-        print(f'PT opslaan fout: {e}')
 
 def load_sent():
     try:
