@@ -37,28 +37,26 @@ def jsonbin_request(method, path, data=None):
         return json.loads(resp.read().decode('utf-8'))
 
 # In-memory opslag als primair
-PT_MEMORY = {'active': False, 'startDate': None, 'startKapitaal': PT_BUDGET, 'posities': [], 'log': []}
+STATE = {'pt': {'active': False, 'startDate': None, 'startKapitaal': PT_BUDGET, 'posities': [], 'log': []}}
 
 def load_pt():
-    global PT_MEMORY
     # Gebruik in-memory als actief
-    if PT_MEMORY.get('active'):
-        return PT_MEMORY
+    if STATE["pt"].get('active'):
+        return STATE["pt"]
     # Probeer JSONBin als backup
     try:
         if JSONBIN_PT_ID:
             result = jsonbin_request('GET', f'/b/{JSONBIN_PT_ID}/latest')
             data = result.get('record', {})
             if data.get('active'):
-                PT_MEMORY = data
-                return PT_MEMORY
+                STATE["pt"] = data
+                return STATE["pt"]
     except Exception as e:
         print(f'JSONBin load fout: {e}')
-    return PT_MEMORY
+    return STATE["pt"]
 
 def save_pt(pt):
-    global PT_MEMORY, JSONBIN_PT_ID
-    PT_MEMORY = pt  # Altijd in memory opslaan
+    STATE["pt"] = pt  # Altijd in memory opslaan
     # Probeer JSONBin als backup
     try:
         pt['_type'] = 'momentum_pt'
@@ -363,17 +361,15 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(200, pt)
 
         elif parsed.path == '/pt/start':
-            global PT_MEMORY
-            PT_MEMORY = {'active': True, 'startDate': datetime.utcnow().strftime('%Y-%m-%d'),
+            STATE["pt"] = {'active': True, 'startDate': datetime.utcnow().strftime('%Y-%m-%d'),
                   'startKapitaal': PT_BUDGET, 'posities': [], 'log': []}
-            save_pt(PT_MEMORY)
+            save_pt(STATE["pt"])
             send_telegram('📊 Papier handel gestart!\nBudget: €10.000\nDe server handelt automatisch tijdens beursuren.')
             self.respond(200, {'status': 'gestart'})
 
         elif parsed.path == '/pt/stop':
-            global PT_MEMORY
-            PT_MEMORY['active'] = False
-            save_pt(PT_MEMORY)
+            STATE["pt"]['active'] = False
+            save_pt(STATE["pt"])
             self.respond(200, {'status': 'gestopt'})
 
         else:
