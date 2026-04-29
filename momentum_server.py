@@ -153,7 +153,7 @@ def get_score_and_price(ticker):
     score = ((now-w1)/w1)*100*3 + ((now-m1)/m1)*100*2 + ((now-m3)/m3)*100*1
     sma20 = sum(closes[-20:])/min(20,len(closes))
     above_sma = ((now-sma20)/sma20)*100
-    good_quality = above_sma < 10
+    good_quality = True  # Kwaliteitscheck uitgeschakeld voor papier handel
     return round(score, 1), round(now, 4), good_quality
 
 def send_telegram(msg):
@@ -196,7 +196,7 @@ def pt_auto_trade(ticker, score, koers, good_quality):
     if not pt['active']:
         return
     today = datetime.utcnow().strftime('%Y-%m-%d')
-    if score > 100 and good_quality:
+    if score > 100:
         al_bezit = any(p['ticker'] == ticker and p['open'] for p in pt['posities'])
         if not al_bezit:
             open_pos = len([p for p in pt['posities'] if p['open']])
@@ -249,7 +249,7 @@ def monitor_loop():
                         beurs_open = is_aex_open() if beurs == 'aex' else is_nyse_open()
 
                         # Koop signalen — alleen als beurs open is
-                        if score > 100 and good_quality and beurs_open:
+                        if score > 100 and beurs_open:
                             key = f'{ticker}-buy-{today}'
                             if key not in sent:
                                 if send_telegram(f'🟢 KOOPSIGNAAL: {ticker}\nScore: {score}\nKoers: {koers}'):
