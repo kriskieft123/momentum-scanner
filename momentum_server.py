@@ -36,43 +36,46 @@ def jsonbin_request(method, path, data=None):
     with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
         return json.loads(resp.read().decode('utf-8'))
 
+# In-memory opslag als primair
+PT_MEMORY = {'active': False, 'startDate': None, 'startKapitaal': PT_BUDGET, 'posities': [], 'log': []}
+
 def load_pt():
-    global JSONBIN_PT_ID
+    global PT_MEMORY
+    # Gebruik in-memory als actief
+    if PT_MEMORY.get('active'):
+        return PT_MEMORY
+    # Probeer JSONBin als backup
     try:
-        if not JSONBIN_PT_ID:
-            # Zoek bestaande bin
-            result = jsonbin_request('GET', '/b?meta=false')
-            for b in result if isinstance(result, list) else []:
-                if b.get('record', {}).get('_type') == 'momentum_pt':
-                    JSONBIN_PT_ID = b['metadata']['id']
-                    return b['record']
-            return {'active': False, 'startDate': None, 'startKapitaal': PT_BUDGET, 'posities': [], 'log': [], '_type': 'momentum_pt'}
-        result = jsonbin_request('GET', f'/b/{JSONBIN_PT_ID}/latest')
-        return result.get('record', {'active': False, 'startDate': None, 'startKapitaal': PT_BUDGET, 'posities': [], 'log': []})
+        if JSONBIN_PT_ID:
+            result = jsonbin_request('GET', f'/b/{JSONBIN_PT_ID}/latest')
+            data = result.get('record', {})
+            if data.get('active'):
+                PT_MEMORY = data
+                return PT_MEMORY
     except Exception as e:
         print(f'JSONBin load fout: {e}')
-        return {'active': False, 'startDate': None, 'startKapitaal': PT_BUDGET, 'posities': [], 'log': []}
+    return PT_MEMORY
 
 def save_pt(pt):
-    global JSONBIN_PT_ID
+    global PT_MEMORY, JSONBIN_PT_ID
+    PT_MEMORY = pt  # Altijd in memory opslaan
+    # Probeer JSONBin als backup
     try:
         pt['_type'] = 'momentum_pt'
         if not JSONBIN_PT_ID:
-            # Maak nieuwe bin aan
             result = jsonbin_request('POST', '/b', pt)
             JSONBIN_PT_ID = result['metadata']['id']
             print(f'JSONBin aangemaakt: {JSONBIN_PT_ID}')
         else:
             jsonbin_request('PUT', f'/b/{JSONBIN_PT_ID}', pt)
-        print('PT opgeslagen in JSONBin')
     except Exception as e:
         print(f'JSONBin save fout: {e}')
-        # Fallback naar bestand
-        try:
-            with open('/tmp/papier_handel.json', 'w') as f:
-                json.dump(pt, f)
-        except:
-            pass
+    # Fallback naar bestand
+    try:
+        with open('/tmp/papier_handel.json', 'w') as f:
+            json.dump(pt, f)
+    except:
+        pass
 
 AEX = [
     'ASML.AS','SHELL.AS','INGA.AS','HEIA.AS','ADYEN.AS','PHIA.AS','ASRNL.AS',
@@ -360,16 +363,17 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(200, pt)
 
         elif parsed.path == '/pt/start':
-            pt = {'active': True, 'startDate': datetime.utcnow().strftime('%Y-%m-%d'),
+            global PT_MEMORY
+            PT_MEMORY = {'active': True, 'startDate': datetime.utcnow().strftime('%Y-%m-%d'),
                   'startKapitaal': PT_BUDGET, 'posities': [], 'log': []}
-            save_pt(pt)
+            save_pt(PT_MEMORY)
             send_telegram('📊 Papier handel gestart!\nBudget: €10.000\nDe server handelt automatisch tijdens beursuren.')
             self.respond(200, {'status': 'gestart'})
 
         elif parsed.path == '/pt/stop':
-            pt = load_pt()
-            pt['active'] = False
-            save_pt(pt)
+            global PT_MEMORY
+            PT_MEMORY['active'] = False
+            save_pt(PT_MEMORY)
             self.respond(200, {'status': 'gestopt'})
 
         else:
