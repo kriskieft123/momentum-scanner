@@ -446,16 +446,33 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == '/financials':
             ticker = params.get('ticker', [''])[0]
             try:
-                url = f'https://query1.finance.yahoo.com/v10/finance/quoteSummary/{urllib.request.quote(ticker)}?modules=incomeStatementHistory'
-                req = urllib.request.Request(url, headers={
-                    'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json',
-                    'Referer': 'https://finance.yahoo.com/'
-                })
-                with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
-                    raw = resp.read()
-                    try: text = gzip.decompress(raw).decode('utf-8')
-                    except: text = raw.decode('utf-8')
-                    data = json.loads(text)
+                # Probeer meerdere Yahoo Finance endpoints
+                urls = [
+                    f'https://query1.finance.yahoo.com/v10/finance/quoteSummary/{urllib.request.quote(ticker)}?modules=incomeStatementHistory',
+                    f'https://query2.finance.yahoo.com/v10/finance/quoteSummary/{urllib.request.quote(ticker)}?modules=incomeStatementHistory',
+                    f'https://query1.finance.yahoo.com/v10/finance/quoteSummary/{urllib.request.quote(ticker)}?modules=financialData,defaultKeyStatistics',
+                ]
+                data = None
+                for url in urls:
+                    try:
+                        req = urllib.request.Request(url, headers={
+                            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                            'Accept': 'application/json',
+                            'Accept-Language': 'en-US,en;q=0.9',
+                            'Referer': 'https://finance.yahoo.com/',
+                            'Origin': 'https://finance.yahoo.com'
+                        })
+                        with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
+                            raw = resp.read()
+                            try: text = gzip.decompress(raw).decode('utf-8')
+                            except: text = raw.decode('utf-8')
+                            data = json.loads(text)
+                            if data.get('quoteSummary',{}).get('result'):
+                                break
+                    except:
+                        continue
+                if not data:
+                    self.respond(200, {'rev': [], 'net': [], 'years': []}); return
                 stmts = data['quoteSummary']['result'][0]['incomeStatementHistory']['incomeStatementHistory']
                 rev, net, years = [], [], []
                 for s in reversed(stmts):
