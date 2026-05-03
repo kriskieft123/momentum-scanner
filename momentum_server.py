@@ -279,7 +279,10 @@ def fetch_news(ticker):
     except:
         return []
 
+NEWS_CACHE = []  # Bewaar laatste nieuws in memory
+
 def check_news_for_ticker(ticker, score, in_bezit, news_sent):
+    global NEWS_CACHE
     headlines = fetch_news(ticker)
     if not headlines:
         return news_sent
@@ -289,12 +292,21 @@ def check_news_for_ticker(ticker, score, in_bezit, news_sent):
         key = f'news-{ticker}-{headline[:40]}'
         if key in news_sent:
             continue
-        # Check rode vlaggen
         red = any(w in hl_lower for w in RED_FLAG_WORDS)
         green = any(w in hl_lower for w in GREEN_FLAG_WORDS)
-        # Stuur melding als:
-        # - Rode vlag bij aandeel in bezit of met koopsignaal (score>80)
-        # - Groene vlag bij aandeel in bezit of met koopsignaal
+        # Voeg toe aan cache
+        nieuws_item = {
+            'ticker': ticker,
+            'headline': headline,
+            'time': datetime.utcnow().strftime('%H:%M'),
+            'date': today,
+            'type': 'red' if red else 'green' if green else 'neutral',
+            'inBezit': in_bezit,
+            'score': score
+        }
+        NEWS_CACHE.insert(0, nieuws_item)
+        if len(NEWS_CACHE) > 100:
+            NEWS_CACHE = NEWS_CACHE[:100]
         if (red or green) and (in_bezit or score > 80):
             icon = '⚠️ NIEUWS ALERT' if red else '📰 NIEUWS'
             bezit_txt = ' · IN BEZIT!' if in_bezit else f' · Score: {score}'
@@ -302,9 +314,9 @@ def check_news_for_ticker(ticker, score, in_bezit, news_sent):
             if send_telegram(msg):
                 news_sent.add(key)
                 save_news_sent(news_sent)
-                print(f'Nieuws verstuurd: {ticker} — {headline[:50]}')
+                print(f'Nieuws verstuurd: {ticker}')
         else:
-            news_sent.add(key)  # markeer als gezien ook als niet verstuurd
+            news_sent.add(key)
     return news_sent
 
 def news_loop():
@@ -453,6 +465,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'rev': rev, 'net': net, 'years': years})
             except:
                 self.respond(200, {'rev': [], 'net': [], 'years': []})
+
+        elif parsed.path == '/news':
+            self.respond(200, NEWS_CACHE[:50])
 
         elif parsed.path == '/pt':
             pt = load_pt()
