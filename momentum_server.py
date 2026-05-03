@@ -508,6 +508,7 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(404, {'error': 'Niet gevonden'})
 
     def do_GET(self):
+        parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
 
         if parsed.path == '/ping':
