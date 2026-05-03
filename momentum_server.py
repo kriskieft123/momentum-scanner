@@ -42,7 +42,9 @@ AEX = [
     'VPK.AS','WKL.AS'
 ]
 
-PT_BUDGET = 10000
+HOUD_VAST_TICKERS = set()  # In memory houd-vast lijst
+
+
 
 # ── Opslag ────────────────────────────────────────────────────────
 def load_pt():
@@ -272,7 +274,34 @@ def pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed, pos52, sma20
                     save_pt(pt)
                     send_telegram(f'🟢 PAPIER KOOP: {ticker}\nScore: {score}\nKoers: {koers}\nAandelen: {aandelen}')
                     print(f'PT Koop: {ticker} @ {koers}')
-    # Verkoop condities:
+    # Houd-vast logica — alleen verkopen bij SMA200 omslag
+    if ticker in HOUD_VAST_TICKERS:
+        for pos in pt['posities']:
+            if pos['ticker'] == ticker and pos['open']:
+                if sma200_rising is not None and not sma200_rising:
+                    pos['open'] = False
+                    pos['verkoopKoers'] = koers
+                    pos['verkoopDatum'] = today
+                    pos['rendement'] = round(((koers - pos['aankoopKoers']) / pos['aankoopKoers']) * 100, 2)
+                    pos['winst'] = round((koers - pos['aankoopKoers']) * pos['aandelen'], 2)
+                    pt['log'].insert(0, {'datum': today, 'type': 'verkoop', 'ticker': ticker, 'koers': koers, 'rendement': pos['rendement'], 'winst': pos['winst'], 'reden': 'SMA200 daalt (houd-vast)'})
+                    save_pt(pt)
+                    send_telegram(f'⚠️ HOUD-VAST VERKOOP: {ticker}\nSMA200 kantelt naar dalend\nKoers: {koers}\nRendement: {pos["rendement"]}%')
+        # Koop nog steeds bij signaal als geen positie
+        if score > 100 and trend_ok and pos52_ok:
+            al_bezit = any(p['ticker'] == ticker and p['open'] for p in pt['posities'])
+            if not al_bezit:
+                open_pos = len([p for p in pt['posities'] if p['open']])
+                if open_pos < 10:
+                    bedrag = PT_BUDGET / 10
+                    aandelen = int(bedrag / koers)
+                    if aandelen >= 1:
+                        pos = {'ticker': ticker, 'aankoopKoers': koers, 'aankoopDatum': today, 'aandelen': aandelen, 'aankoopScore': score, 'open': True, 'houdVast': True}
+                        pt['posities'].append(pos)
+                        pt['log'].insert(0, {'datum': today, 'type': 'koop', 'ticker': ticker, 'koers': koers, 'aandelen': aandelen, 'score': score, 'houdVast': True})
+                        save_pt(pt)
+                        send_telegram(f'📌 HOUD-VAST KOOP: {ticker}\nScore: {score}\nKoers: {koers}\nVerkoopt alleen bij SMA200 omslag')
+        return
     # 1. Score <50 (harde verkoopzone)
     # 2. Trend daalt sterk EN score <80
     # 3. SMA200 kantelt naar dalend EN score <90
@@ -461,7 +490,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', '*')
         self.end_headers()
 
-    def do_GET(self):
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length)
+        try:
+            data = json.loads(body)
+        except:
+            data = {}
+
+        if parsed.path == '/houdvast':
+            global HOUD_VAST_TICKERS
+            HOUD_VAST_TICKERS = set(data.get('tickers', []))
+            print(f'Houd-vast bijgewerkt: {HOUD_VAST_TICKERS}')
+            self.respond(200, {'status': 'ok', 'tickers': list(HOUD_VAST_TICKERS)})
+        else:
+            self.respond(404, {'error': 'Niet gevonden'})
+
+
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
 
