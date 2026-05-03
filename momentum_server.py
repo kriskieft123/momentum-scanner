@@ -77,10 +77,14 @@ def save_sent(sent):
 
 def fetch_finnhub_financials(ticker):
     clean = ticker.replace('.AS','').replace('.DE','').replace('.L','')
+    key = FINNHUB_KEY.strip()
     try:
-        # Gebruik basic financials - wel beschikbaar op gratis tier
-        url = f'https://finnhub.io/api/v1/stock/metric?symbol={urllib.request.quote(clean)}&metric=all&token={FINNHUB_KEY}'
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        url = f'https://finnhub.io/api/v1/stock/metric?symbol={urllib.request.quote(clean)}&metric=all&token={key}'
+        print(f'Finnhub URL: {url[:80]}')
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'application/json'
+        })
         with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
             raw = resp.read()
             try: text = gzip.decompress(raw).decode('utf-8')
@@ -88,22 +92,22 @@ def fetch_finnhub_financials(ticker):
             data = json.loads(text)
         m = data.get('metric', {})
         if not m:
+            print(f'Finnhub geen metric data voor {ticker}')
             return None
-        # Haal jaarlijkse omzet en winst op uit metrics
-        rev_annual = m.get('revenueAnnual', None)
-        net_annual = m.get('netIncomeAnnual', None)
-        eps_annual = m.get('epsAnnual', None)
-        if not rev_annual:
-            return None
-        # Bouw simpele lijst met huidige jaar
-        from datetime import datetime
-        year = datetime.utcnow().year
+        rev = m.get('revenuePerShareAnnual', 0)
+        net = m.get('netProfitMarginAnnual', 0)
+        eps = m.get('epsAnnual', 0)
+        pe = m.get('peBasicExclExtraTTM', 0)
+        high52 = m.get('52WeekHigh', 0)
+        low52 = m.get('52WeekLow', 0)
+        print(f'Finnhub OK {ticker}: EPS={eps}, PE={pe}')
         return {
-            'rev': [round(rev_annual/1e9, 2)],
-            'net': [round(net_annual/1e9, 2) if net_annual else 0],
-            'years': [year],
-            'eps': eps_annual,
-            'single': True  # markeer als enkel datapunt
+            'rev': [rev] if rev else [],
+            'net': [net] if net else [],
+            'years': [datetime.utcnow().year],
+            'eps': eps, 'pe': pe,
+            'high52': high52, 'low52': low52,
+            'single': True
         }
     except Exception as e:
         print(f'Finnhub fin fout {ticker}: {e}')
