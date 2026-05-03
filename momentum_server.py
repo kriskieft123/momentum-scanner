@@ -190,7 +190,7 @@ def pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed):
     if not pt.get('active'):
         return
     today = datetime.utcnow().strftime('%Y-%m-%d')
-    # Koop: score >100 EN trend stijgend (delta>0) of drempel gekruist
+    # Koop: score >100 EN trend stijgend of drempel gekruist
     trend_ok = trend_crossed or (trend_delta is not None and trend_delta > 0)
     if score > 100 and trend_ok:
         al_bezit = any(p['ticker'] == ticker and p['open'] for p in pt['posities'])
@@ -213,7 +213,12 @@ def pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed):
                     save_pt(pt)
                     send_telegram(f'🟢 PAPIER KOOP: {ticker}\nScore: {score}\nKoers: {koers}\nAandelen: {aandelen}')
                     print(f'PT Koop: {ticker} @ {koers}')
-    elif score < 50:
+    # Verkoop condities:
+    # 1. Score <50 (harde verkoopzone)
+    # 2. Score daalt sterk (trend_delta < -20) EN score onder 80
+    trend_sell = trend_delta is not None and trend_delta < -20 and score < 80
+    hard_sell = score < 50
+    if hard_sell or trend_sell:
         for pos in pt['posities']:
             if pos['ticker'] == ticker and pos['open']:
                 pos['open'] = False
@@ -221,10 +226,11 @@ def pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed):
                 pos['verkoopDatum'] = today
                 pos['rendement'] = round(((koers - pos['aankoopKoers']) / pos['aankoopKoers']) * 100, 2)
                 pos['winst'] = round((koers - pos['aankoopKoers']) * pos['aandelen'], 2)
-                pt['log'].insert(0, {'datum': today, 'type': 'verkoop', 'ticker': ticker, 'koers': koers, 'rendement': pos['rendement'], 'winst': pos['winst']})
+                reden = 'Score in verkoopzone (<50)' if hard_sell else f'Momentum keert om (trend: {round(trend_delta,1)}, score: {score})'
+                pt['log'].insert(0, {'datum': today, 'type': 'verkoop', 'ticker': ticker, 'koers': koers, 'rendement': pos['rendement'], 'winst': pos['winst'], 'reden': reden})
                 save_pt(pt)
-                send_telegram(f'📉 PAPIER VERKOOP: {ticker}\nScore: {score}\nKoers: {koers}\nRendement: {pos["rendement"]}%\nWinst: €{pos["winst"]}')
-                print(f'PT Verkoop: {ticker} @ {koers}')
+                send_telegram(f'📉 PAPIER VERKOOP: {ticker}\n{reden}\nKoers: {koers}\nRendement: {pos["rendement"]}%\nWinst: €{pos["winst"]}')
+                print(f'PT Verkoop: {ticker} @ {koers} — {reden}')
 
 # ── Monitor loop ──────────────────────────────────────────────────
 def monitor_loop():
