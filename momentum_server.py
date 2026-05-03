@@ -142,7 +142,7 @@ def get_score_and_price(ticker):
     timestamps = result['timestamp']
     closes = [v for v in raw_closes if v is not None]
     if len(closes) < 10:
-        return None, None, None
+        return None, None, None, None, None, None
 
     now = closes[-1]
     nowTs = timestamps[-1]
@@ -161,11 +161,11 @@ def get_score_and_price(ticker):
     m3=fc(timestamps,raw_closes,nowTs,90)
     d2=fc(timestamps,raw_closes,nowTs,2)
     if not w1 or not m1 or not m3:
-        return None, None, None
+        return None, None, None, None, None, None
 
     score = ((now-d2)/d2*100*4 if d2 else 0) + ((now-w1)/w1)*100*3 + ((now-m1)/m1)*100*2 + ((now-m3)/m3)*100*1
 
-    # Bereken score van 7 dagen geleden
+    # Trend: score 7 dagen geleden
     cutoff = nowTs - 7*86400
     hist_idx = 0
     for i in range(len(timestamps)-1, -1, -1):
@@ -187,7 +187,18 @@ def get_score_and_price(ticker):
     trend_delta = round(score - hist_score, 1) if hist_score is not None else None
     trend_crossed = hist_score is not None and hist_score < 100 and score >= 100
 
-    return round(score, 1), round(now, 4), trend_delta, trend_crossed
+    # 52-weeks positie
+    week52 = closes[-252:] if len(closes) >= 252 else closes
+    high52 = max(week52)
+    low52 = min(week52)
+    pos52 = ((now - low52) / (high52 - low52) * 100) if high52 != low52 else 50
+
+    # SMA200 trend
+    sma200_now = sum(closes[-200:]) / 200 if len(closes) >= 200 else None
+    sma200_old = sum(closes[-230:-30]) / 200 if len(closes) >= 230 else None
+    sma200_rising = (sma200_now > sma200_old) if sma200_now and sma200_old else None
+
+    return round(score, 1), round(now, 4), trend_delta, trend_crossed, round(pos52, 1), sma200_rising
 
 # ── Telegram ──────────────────────────────────────────────────────
 def send_telegram(msg):
@@ -225,14 +236,22 @@ def beurs_open_voor(ticker):
     return is_nyse_open()
 
 # ── Papier handel ─────────────────────────────────────────────────
-def pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed):
+def pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed, pos52, sma200_rising):
     pt = load_pt()
     if not pt.get('active'):
         return
     today = datetime.utcnow().strftime('%Y-%m-%d')
-    # Koop: score >100 EN trend stijgend of drempel gekruist
+
+    # Koop condities — allemaal groen:
+    # 1. Score >100
+    # 2. Trend stijgend of drempel gekruist
+    # 3. 52-weeks positie >40% (niet op jaarlaag)
+    # 4. SMA200 stijgend (als beschikbaar)
     trend_ok = trend_crossed or (trend_delta is not None and trend_delta > 0)
-    if score > 100 and trend_ok:
+    pos52_ok = pos52 is None or pos52 > 40
+    sma200_ok = sma200_rising is None or sma200_rising  # geen data = niet blokkeren
+
+    if score > 100 and trend_ok and pos52_ok and sma200_ok:
         al_bezit = any(p['ticker'] == ticker and p['open'] for p in pt['posities'])
         if not al_bezit:
             open_pos = len([p for p in pt['posities'] if p['open']])
@@ -255,10 +274,13 @@ def pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed):
                     print(f'PT Koop: {ticker} @ {koers}')
     # Verkoop condities:
     # 1. Score <50 (harde verkoopzone)
-    # 2. Score daalt sterk (trend_delta < -20) EN score onder 80
+    # 2. Trend daalt sterk EN score <80
+    # 3. SMA200 kantelt naar dalend EN score <90
     trend_sell = trend_delta is not None and trend_delta < -20 and score < 80
+    sma200_sell = sma200_rising is not None and not sma200_rising and score < 90
     hard_sell = score < 50
-    if hard_sell or trend_sell:
+
+    if hard_sell or trend_sell or sma200_sell:
         for pos in pt['posities']:
             if pos['ticker'] == ticker and pos['open']:
                 pos['open'] = False
@@ -266,7 +288,7 @@ def pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed):
                 pos['verkoopDatum'] = today
                 pos['rendement'] = round(((koers - pos['aankoopKoers']) / pos['aankoopKoers']) * 100, 2)
                 pos['winst'] = round((koers - pos['aankoopKoers']) * pos['aandelen'], 2)
-                reden = 'Score in verkoopzone (<50)' if hard_sell else f'Momentum keert om (trend: {round(trend_delta,1)}, score: {score})'
+                reden = 'Score in verkoopzone (<50)' if hard_sell else (f'SMA200 kantelt naar dalend (score: {score})' if sma200_sell else f'Momentum keert om (trend: {round(trend_delta,1)}, score: {score})')
                 pt['log'].insert(0, {'datum': today, 'type': 'verkoop', 'ticker': ticker, 'koers': koers, 'rendement': pos['rendement'], 'winst': pos['winst'], 'reden': reden})
                 save_pt(pt)
                 send_telegram(f'📉 PAPIER VERKOOP: {ticker}\n{reden}\nKoers: {koers}\nRendement: {pos["rendement"]}%\nWinst: €{pos["winst"]}')
@@ -391,12 +413,12 @@ def monitor_loop():
                 print(f'Controle: {datetime.utcnow().strftime("%H:%M UTC")}')
                 for ticker in WATCHLIST:
                     try:
-                        score, koers, trend_delta, trend_crossed = get_score_and_price(ticker)
+                        score, koers, trend_delta, trend_crossed, pos52, sma200_rising = get_score_and_price(ticker)
                         if score is None:
                             time.sleep(2)
                             continue
                         beurs_open = beurs_open_voor(ticker)
-                        # Koopsignaal — score >100 EN trend stijgend
+                        # Koopsignaal
                         if score > 100 and beurs_open:
                             key = f'{ticker}-buy-{today}'
                             if key not in sent:
@@ -404,7 +426,7 @@ def monitor_loop():
                                 if trend_crossed:
                                     trend_info = '\n⭐ Koopdrempel deze week gekruist!'
                                 elif trend_delta is not None:
-                                    trend_info = f'\nTrend: {"+" if trend_delta>0 else ""}{round(trend_delta,1)} vs 7 dagen geleden'
+                                    trend_info = f'\nTrend: {"+" if trend_delta>0 else ""}{round(trend_delta,1)} vs 7d'
                                 if send_telegram(f'🟢 KOOPSIGNAAL: {ticker}\nScore: {score}\nKoers: {koers}{trend_info}'):
                                     sent.add(key); save_sent(sent)
                         # Verkoopsignaal alleen AEX
@@ -414,9 +436,9 @@ def monitor_loop():
                                 label = 'VERKOOPSIGNAAL' if score < 50 else 'WAARSCHUWING'
                                 if send_telegram(f'📉 {label}: {ticker}\nScore: {score}\nKoers: {koers}'):
                                     sent.add(key); save_sent(sent)
-                        # Papier handel — zelfde logica als app
+                        # Papier handel
                         if beurs_open:
-                            pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed)
+                            pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed, pos52, sma200_rising)
                         time.sleep(3)
                     except Exception as e:
                         print(f'Fout {ticker}: {e}')
