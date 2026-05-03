@@ -11,6 +11,7 @@ import os
 import time
 import threading
 import urllib.request
+import re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
@@ -232,7 +233,103 @@ def pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed):
                 send_telegram(f'📉 PAPIER VERKOOP: {ticker}\n{reden}\nKoers: {koers}\nRendement: {pos["rendement"]}%\nWinst: €{pos["winst"]}')
                 print(f'PT Verkoop: {ticker} @ {koers} — {reden}')
 
-# ── Monitor loop ──────────────────────────────────────────────────
+# ── Nieuws monitoring ─────────────────────────────────────────────
+NEWS_SENT_FILE = '/tmp/news_sent.json'
+RED_FLAG_WORDS = ['fraud','scandal','bankrupt','recall','resign','fired','lawsuit','investigation','crash','suspended','delisted','warning','loss','decline','miss','downgrade','cut','arrest','probe']
+GREEN_FLAG_WORDS = ['beats','record','profit','growth','upgrade','buy','strong','surge','rally','partnership','deal','acquisition','dividend','launch']
+
+# Mapping ticker naar zoekterm
+TICKER_NAMES = {
+    'ASML.AS':'ASML','SHELL.AS':'Shell','INGA.AS':'ING','HEIA.AS':'Heineken',
+    'ADYEN.AS':'Adyen','PHIA.AS':'Philips','ABN.AS':'ABN AMRO','BESI.AS':'BESI',
+    'NVDA':'Nvidia','AAPL':'Apple','MSFT':'Microsoft','GOOG':'Google Alphabet',
+    'AMZN':'Amazon','META':'Meta','TSLA':'Tesla','NFLX':'Netflix',
+    'AMD':'AMD','PLTR':'Palantir','UBER':'Uber','AVGO':'Broadcom',
+    'JPM':'JPMorgan','BAC':'Bank of America','GS':'Goldman Sachs',
+    'JNJ':'Johnson Johnson','LLY':'Eli Lilly','ABBV':'AbbVie','PFE':'Pfizer',
+    'XOM':'ExxonMobil','V':'Visa','MA':'Mastercard','WMT':'Walmart',
+}
+
+def load_news_sent():
+    try:
+        with open(NEWS_SENT_FILE, 'r') as f:
+            return set(json.load(f))
+    except:
+        return set()
+
+def save_news_sent(sent):
+    try:
+        with open(NEWS_SENT_FILE, 'w') as f:
+            json.dump(list(sent)[-200:], f)
+    except:
+        pass
+
+def fetch_news(ticker):
+    name = TICKER_NAMES.get(ticker, ticker.replace('.AS','').replace('.DE',''))
+    try:
+        url = f'https://feeds.finance.yahoo.com/rss/2.0/headline?s={urllib.request.quote(ticker)}&region=US&lang=en-US'
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as resp:
+            text = resp.read().decode('utf-8', errors='ignore')
+        # Parse RSS titels
+        titles = re.findall(r'<title><!\[CDATA\[(.*?)\]\]></title>', text)
+        if not titles:
+            titles = re.findall(r'<title>(.*?)</title>', text)
+        return [t.strip() for t in titles[1:6] if t.strip()]  # eerste 5 nieuwsberichten
+    except:
+        return []
+
+def check_news_for_ticker(ticker, score, in_bezit, news_sent):
+    headlines = fetch_news(ticker)
+    if not headlines:
+        return news_sent
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+    for headline in headlines:
+        hl_lower = headline.lower()
+        key = f'news-{ticker}-{headline[:40]}'
+        if key in news_sent:
+            continue
+        # Check rode vlaggen
+        red = any(w in hl_lower for w in RED_FLAG_WORDS)
+        green = any(w in hl_lower for w in GREEN_FLAG_WORDS)
+        # Stuur melding als:
+        # - Rode vlag bij aandeel in bezit of met koopsignaal (score>80)
+        # - Groene vlag bij aandeel in bezit of met koopsignaal
+        if (red or green) and (in_bezit or score > 80):
+            icon = '⚠️ NIEUWS ALERT' if red else '📰 NIEUWS'
+            bezit_txt = ' · IN BEZIT!' if in_bezit else f' · Score: {score}'
+            msg = f'{icon}: {ticker}\n"{headline}"\n{bezit_txt}'
+            if send_telegram(msg):
+                news_sent.add(key)
+                save_news_sent(news_sent)
+                print(f'Nieuws verstuurd: {ticker} — {headline[:50]}')
+        else:
+            news_sent.add(key)  # markeer als gezien ook als niet verstuurd
+    return news_sent
+
+def news_loop():
+    print('Nieuws loop gestart')
+    news_sent = load_news_sent()
+    while True:
+        try:
+            if is_beurstijd():
+                print(f'Nieuws check: {datetime.utcnow().strftime("%H:%M UTC")}')
+                pt = load_pt()
+                open_tickers = set(p['ticker'] for p in pt.get('posities', []) if p.get('open'))
+                for ticker in WATCHLIST:
+                    try:
+                        in_bezit = ticker in open_tickers
+                        # Haal score op uit cache of skip
+                        news_sent = check_news_for_ticker(ticker, 0, in_bezit, news_sent)
+                        time.sleep(1)
+                    except Exception as e:
+                        print(f'Nieuws fout {ticker}: {e}')
+                print('Nieuws check klaar')
+        except Exception as e:
+            print(f'Nieuws loop fout: {e}')
+        time.sleep(60 * 60)  # Elk uur
+
+
 def monitor_loop():
     print('Monitor loop gestart')
     sent = load_sent()
@@ -393,6 +490,8 @@ if __name__ == '__main__':
     os.makedirs(DATA_DIR, exist_ok=True)
     t = threading.Thread(target=monitor_loop, daemon=True)
     t.start()
+    t2 = threading.Thread(target=news_loop, daemon=True)
+    t2.start()
     server = HTTPServer(('0.0.0.0', PORT), Handler)
     print(f"Momentum Scanner Server draait op port {PORT}")
     print(f"Telegram: {'Actief' if TG_TOKEN else 'Niet ingesteld'}")
