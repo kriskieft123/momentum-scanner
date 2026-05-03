@@ -385,19 +385,17 @@ def news_loop():
     news_sent = load_news_sent()
     while True:
         try:
-            if is_beurstijd():
-                print(f'Nieuws check: {datetime.utcnow().strftime("%H:%M UTC")}')
-                pt = load_pt()
-                open_tickers = set(p['ticker'] for p in pt.get('posities', []) if p.get('open'))
-                for ticker in WATCHLIST:
-                    try:
-                        in_bezit = ticker in open_tickers
-                        # Haal score op uit cache of skip
-                        news_sent = check_news_for_ticker(ticker, 0, in_bezit, news_sent)
-                        time.sleep(1)
-                    except Exception as e:
-                        print(f'Nieuws fout {ticker}: {e}')
-                print('Nieuws check klaar')
+            print(f'Nieuws check: {datetime.utcnow().strftime("%H:%M UTC")}')
+            pt = load_pt()
+            open_tickers = set(p['ticker'] for p in pt.get('posities', []) if p.get('open'))
+            for ticker in WATCHLIST:
+                try:
+                    in_bezit = ticker in open_tickers
+                    news_sent = check_news_for_ticker(ticker, 0, in_bezit, news_sent)
+                    time.sleep(1)
+                except Exception as e:
+                    print(f'Nieuws fout {ticker}: {e}')
+            print('Nieuws check klaar')
         except Exception as e:
             print(f'Nieuws loop fout: {e}')
         time.sleep(60 * 60)  # Elk uur
