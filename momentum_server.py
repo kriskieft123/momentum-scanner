@@ -43,6 +43,7 @@ AEX = [
 ]
 
 HOUD_VAST_TICKERS = set()  # In memory houd-vast lijst
+PT_BUDGET = 10000
 
 
 
