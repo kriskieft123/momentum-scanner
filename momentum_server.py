@@ -75,30 +75,35 @@ def save_sent(sent):
         pass
 
 def fetch_finnhub_financials(ticker):
-    # Verwijder .AS en .DE voor Finnhub (alleen US tickers)
     clean = ticker.replace('.AS','').replace('.DE','').replace('.L','')
     try:
-        url = f'https://finnhub.io/api/v1/stock/financials-reported?symbol={urllib.request.quote(clean)}&freq=annual&token={FINNHUB_KEY}'
+        # Gebruik basic financials - wel beschikbaar op gratis tier
+        url = f'https://finnhub.io/api/v1/stock/metric?symbol={urllib.request.quote(clean)}&metric=all&token={FINNHUB_KEY}'
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
             raw = resp.read()
             try: text = gzip.decompress(raw).decode('utf-8')
             except: text = raw.decode('utf-8')
             data = json.loads(text)
-        reports = data.get('data', [])
-        if not reports:
+        m = data.get('metric', {})
+        if not m:
             return None
-        rev, net, years = [], [], []
-        for r in sorted(reports, key=lambda x: x.get('year', 0))[-5:]:
-            year = r.get('year')
-            ic = r.get('report', {}).get('ic', [])
-            revenue = next((i['value'] for i in ic if i.get('concept') in ['Revenues','RevenueFromContractWithCustomerExcludingAssessedTax','SalesRevenueNet'] and i.get('value')), None)
-            net_income = next((i['value'] for i in ic if i.get('concept') == 'NetIncomeLoss' and i.get('value')), None)
-            if year and revenue:
-                years.append(year)
-                rev.append(round((revenue or 0)/1e9, 2))
-                net.append(round((net_income or 0)/1e9, 2))
-        return {'rev': rev, 'net': net, 'years': years} if rev else None
+        # Haal jaarlijkse omzet en winst op uit metrics
+        rev_annual = m.get('revenueAnnual', None)
+        net_annual = m.get('netIncomeAnnual', None)
+        eps_annual = m.get('epsAnnual', None)
+        if not rev_annual:
+            return None
+        # Bouw simpele lijst met huidige jaar
+        from datetime import datetime
+        year = datetime.utcnow().year
+        return {
+            'rev': [round(rev_annual/1e9, 2)],
+            'net': [round(net_annual/1e9, 2) if net_annual else 0],
+            'years': [year],
+            'eps': eps_annual,
+            'single': True  # markeer als enkel datapunt
+        }
     except Exception as e:
         print(f'Finnhub fin fout {ticker}: {e}')
         return None
