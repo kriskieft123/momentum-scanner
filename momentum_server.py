@@ -606,8 +606,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'closes': closes, 'timestamps': timestamps})
             except Exception as e:
                 self.respond(500, {'error': str(e)})
+
+        elif parsed.path == '/pt':
             pt = load_pt()
-            geInvesteerd = sum(p['aankoopKoers']*p['aandelen'] for p in pt['posities'] if p['open'])
             geslotenWinst = sum(p.get('winst',0) for p in pt['posities'] if not p['open'])
             pt['pnl'] = round(geslotenWinst, 2)
             self.respond(200, pt)
