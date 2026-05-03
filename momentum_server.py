@@ -548,7 +548,18 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == '/news':
             self.respond(200, NEWS_CACHE[:50])
 
-        elif parsed.path == '/pt':
+        elif parsed.path == '/backtest':
+            ticker = params.get('ticker', [''])[0]
+            if not ticker:
+                self.respond(400, {'error': 'Geen ticker'}); return
+            try:
+                data = yahoo_fetch(ticker, '2y')
+                result = data['chart']['result'][0]
+                closes = [v if v is not None else None for v in result['indicators']['quote'][0]['close']]
+                timestamps = result['timestamp']
+                self.respond(200, {'closes': closes, 'timestamps': timestamps})
+            except Exception as e:
+                self.respond(500, {'error': str(e)})
             pt = load_pt()
             geInvesteerd = sum(p['aankoopKoers']*p['aandelen'] for p in pt['posities'] if p['open'])
             geslotenWinst = sum(p.get('winst',0) for p in pt['posities'] if not p['open'])
