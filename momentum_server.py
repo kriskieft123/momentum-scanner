@@ -21,7 +21,8 @@ TG_TOKEN = os.environ.get('TG_TOKEN', '')
 TG_CHAT = os.environ.get('TG_CHAT', '')
 DATA_DIR = '/data'
 PT_FILE = os.path.join(DATA_DIR, 'papier_handel.json')
-FINNHUB_KEY = os.environ.get('FINNHUB_KEY', 'd7ri6ppr01qahvdne5gd7ri6ppr01qahvdne60')
+FINNHUB_KEY = os.environ.get('FINNHUB_KEY') or 'd7ri6ppr01qahvdne5gd7ri6ppr01qahvdne60'
+print(f'Finnhub key: {FINNHUB_KEY[:10]}...')
 
 ssl_ctx = ssl._create_unverified_context()
 
