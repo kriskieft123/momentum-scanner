@@ -487,7 +487,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', '*')
         self.end_headers()
 
@@ -499,7 +499,6 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(body)
         except:
             data = {}
-
         if parsed.path == '/houdvast':
             global HOUD_VAST_TICKERS
             HOUD_VAST_TICKERS = set(data.get('tickers', []))
@@ -508,8 +507,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.respond(404, {'error': 'Niet gevonden'})
 
-
-        parsed = urlparse(self.path)
+    def do_GET(self):
         params = parse_qs(parsed.query)
 
         if parsed.path == '/ping':
