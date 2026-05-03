@@ -102,22 +102,52 @@ def get_score_and_price(ticker):
     timestamps = result['timestamp']
     closes = [v for v in raw_closes if v is not None]
     if len(closes) < 10:
-        return None, None
+        return None, None, None
+
     now = closes[-1]
     nowTs = timestamps[-1]
-    def fc(days):
-        t = nowTs - days*86400
+
+    def fc(ts_list, cl_list, ref_ts, days):
+        t = ref_ts - days*86400
         bi = 0; bd = float('inf')
-        for i, ts in enumerate(timestamps):
-            if raw_closes[i] is None: continue
+        for i, ts in enumerate(ts_list):
+            if cl_list[i] is None: continue
             d = abs(ts-t)
             if d < bd: bd=d; bi=i
-        return raw_closes[bi]
-    w1=fc(7); m1=fc(30); m3=fc(90)
+        return cl_list[bi]
+
+    w1=fc(timestamps,raw_closes,nowTs,7)
+    m1=fc(timestamps,raw_closes,nowTs,30)
+    m3=fc(timestamps,raw_closes,nowTs,90)
+    d2=fc(timestamps,raw_closes,nowTs,2)
     if not w1 or not m1 or not m3:
-        return None, None
-    score = ((now-w1)/w1)*100*3 + ((now-m1)/m1)*100*2 + ((now-m3)/m3)*100*1
-    return round(score, 1), round(now, 4)
+        return None, None, None
+
+    score = ((now-d2)/d2*100*4 if d2 else 0) + ((now-w1)/w1)*100*3 + ((now-m1)/m1)*100*2 + ((now-m3)/m3)*100*1
+
+    # Bereken score van 7 dagen geleden
+    cutoff = nowTs - 7*86400
+    hist_idx = 0
+    for i in range(len(timestamps)-1, -1, -1):
+        if timestamps[i] <= cutoff:
+            hist_idx = i; break
+    hist_score = None
+    if hist_idx > 10:
+        hist_closes = [v for v in raw_closes[:hist_idx+1] if v is not None]
+        hist_ts = [timestamps[i] for i in range(hist_idx+1) if raw_closes[i] is not None]
+        if len(hist_closes) >= 10:
+            hn = hist_closes[-1]; hTs = hist_ts[-1]
+            hw1=fc(hist_ts,hist_closes,hTs,7)
+            hm1=fc(hist_ts,hist_closes,hTs,30)
+            hm3=fc(hist_ts,hist_closes,hTs,90)
+            hd2=fc(hist_ts,hist_closes,hTs,2)
+            if hw1 and hm1 and hm3:
+                hist_score = ((hn-hd2)/hd2*100*4 if hd2 else 0) + ((hn-hw1)/hw1)*100*3 + ((hn-hm1)/hm1)*100*2 + ((hn-hm3)/hm3)*100*1
+
+    trend_delta = round(score - hist_score, 1) if hist_score is not None else None
+    trend_crossed = hist_score is not None and hist_score < 100 and score >= 100
+
+    return round(score, 1), round(now, 4), trend_delta, trend_crossed
 
 # ── Telegram ──────────────────────────────────────────────────────
 def send_telegram(msg):
@@ -155,12 +185,14 @@ def beurs_open_voor(ticker):
     return is_nyse_open()
 
 # ── Papier handel ─────────────────────────────────────────────────
-def pt_auto_trade(ticker, score, koers):
+def pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed):
     pt = load_pt()
     if not pt.get('active'):
         return
     today = datetime.utcnow().strftime('%Y-%m-%d')
-    if score > 100:
+    # Koop: score >100 EN trend stijgend (delta>0) of drempel gekruist
+    trend_ok = trend_crossed or (trend_delta is not None and trend_delta > 0)
+    if score > 100 and trend_ok:
         al_bezit = any(p['ticker'] == ticker and p['open'] for p in pt['posities'])
         if not al_bezit:
             open_pos = len([p for p in pt['posities'] if p['open']])
@@ -205,16 +237,21 @@ def monitor_loop():
                 print(f'Controle: {datetime.utcnow().strftime("%H:%M UTC")}')
                 for ticker in WATCHLIST:
                     try:
-                        score, koers = get_score_and_price(ticker)
+                        score, koers, trend_delta, trend_crossed = get_score_and_price(ticker)
                         if score is None:
                             time.sleep(2)
                             continue
                         beurs_open = beurs_open_voor(ticker)
-                        # Koopsignaal
+                        # Koopsignaal — score >100 EN trend stijgend
                         if score > 100 and beurs_open:
                             key = f'{ticker}-buy-{today}'
                             if key not in sent:
-                                if send_telegram(f'🟢 KOOPSIGNAAL: {ticker}\nScore: {score}\nKoers: {koers}'):
+                                trend_info = ''
+                                if trend_crossed:
+                                    trend_info = '\n⭐ Koopdrempel deze week gekruist!'
+                                elif trend_delta is not None:
+                                    trend_info = f'\nTrend: {"+" if trend_delta>0 else ""}{round(trend_delta,1)} vs 7 dagen geleden'
+                                if send_telegram(f'🟢 KOOPSIGNAAL: {ticker}\nScore: {score}\nKoers: {koers}{trend_info}'):
                                     sent.add(key); save_sent(sent)
                         # Verkoopsignaal alleen AEX
                         elif score < 60 and ticker in AEX and is_aex_open():
@@ -223,9 +260,9 @@ def monitor_loop():
                                 label = 'VERKOOPSIGNAAL' if score < 50 else 'WAARSCHUWING'
                                 if send_telegram(f'📉 {label}: {ticker}\nScore: {score}\nKoers: {koers}'):
                                     sent.add(key); save_sent(sent)
-                        # Papier handel
+                        # Papier handel — zelfde logica als app
                         if beurs_open:
-                            pt_auto_trade(ticker, score, koers)
+                            pt_auto_trade(ticker, score, koers, trend_delta, trend_crossed)
                         time.sleep(3)
                     except Exception as e:
                         print(f'Fout {ticker}: {e}')
