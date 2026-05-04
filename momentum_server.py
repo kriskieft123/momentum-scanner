@@ -21,9 +21,6 @@ TG_TOKEN = os.environ.get('TG_TOKEN', '')
 TG_CHAT = os.environ.get('TG_CHAT', '')
 DATA_DIR = '/data'
 PT_FILE = os.path.join(DATA_DIR, 'papier_handel.json')
-FINNHUB_KEY = os.environ.get('FINNHUB_KEY') or 'd7ri6ppr01qahvdne5gd7ri6ppr01qahvdne60'
-print(f'Finnhub key: {FINNHUB_KEY[:10]}...')
-
 ssl_ctx = ssl._create_unverified_context()
 
 WATCHLIST = [
@@ -77,44 +74,6 @@ def save_sent(sent):
             json.dump(list(sent), f)
     except:
         pass
-
-def fetch_finnhub_financials(ticker):
-    clean = ticker.replace('.AS','').replace('.DE','').replace('.L','')
-    key = FINNHUB_KEY.strip()
-    try:
-        url = f'https://finnhub.io/api/v1/stock/metric?symbol={urllib.request.quote(clean)}&metric=all&token={key}'
-        print(f'Finnhub URL: {url[:80]}')
-        req = urllib.request.Request(url, headers={
-            'User-Agent': 'Mozilla/5.0',
-            'Accept': 'application/json'
-        })
-        with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
-            raw = resp.read()
-            try: text = gzip.decompress(raw).decode('utf-8')
-            except: text = raw.decode('utf-8')
-            data = json.loads(text)
-        m = data.get('metric', {})
-        if not m:
-            print(f'Finnhub geen metric data voor {ticker}')
-            return None
-        rev = m.get('revenuePerShareAnnual', 0)
-        net = m.get('netProfitMarginAnnual', 0)
-        eps = m.get('epsAnnual', 0)
-        pe = m.get('peBasicExclExtraTTM', 0)
-        high52 = m.get('52WeekHigh', 0)
-        low52 = m.get('52WeekLow', 0)
-        print(f'Finnhub OK {ticker}: EPS={eps}, PE={pe}')
-        return {
-            'rev': [rev] if rev else [],
-            'net': [net] if net else [],
-            'years': [datetime.utcnow().year],
-            'eps': eps, 'pe': pe,
-            'high52': high52, 'low52': low52,
-            'single': True
-        }
-    except Exception as e:
-        print(f'Finnhub fin fout {ticker}: {e}')
-        return None
 
 # ── Yahoo Finance ─────────────────────────────────────────────────
 def yahoo_fetch(ticker, rng='1y'):
@@ -646,3 +605,4 @@ if __name__ == '__main__':
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nServer gestopt.")
+
