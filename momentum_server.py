@@ -550,46 +550,40 @@ class Handler(BaseHTTPRequestHandler):
 
         elif parsed.path == '/financials':
             ticker = params.get('ticker', [''])[0]
-            # Probeer eerst Finnhub
-            result = fetch_finnhub_financials(ticker)
-            if result and result.get('rev'):
-                self.respond(200, result)
-            else:
-                # Fallback naar Yahoo Finance
-                try:
-                    urls = [
-                        f'https://query1.finance.yahoo.com/v10/finance/quoteSummary/{urllib.request.quote(ticker)}?modules=incomeStatementHistory',
-                        f'https://query2.finance.yahoo.com/v10/finance/quoteSummary/{urllib.request.quote(ticker)}?modules=incomeStatementHistory',
-                    ]
-                    data = None
-                    for url in urls:
-                        try:
-                            req = urllib.request.Request(url, headers={
-                                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-                                'Accept': 'application/json',
-                                'Referer': 'https://finance.yahoo.com/',
-                            })
-                            with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
-                                raw = resp.read()
-                                try: text = gzip.decompress(raw).decode('utf-8')
-                                except: text = raw.decode('utf-8')
-                                data = json.loads(text)
-                                if data.get('quoteSummary',{}).get('result'):
-                                    break
-                        except:
-                            continue
-                    if data:
-                        stmts = data['quoteSummary']['result'][0]['incomeStatementHistory']['incomeStatementHistory']
-                        rev, net, years = [], [], []
-                        for s in reversed(stmts):
-                            years.append(datetime.fromtimestamp(s['endDate']['raw']).year)
-                            rev.append((s.get('totalRevenue',{}).get('raw',0) or 0)/1e9)
-                            net.append((s.get('netIncome',{}).get('raw',0) or 0)/1e9)
-                        self.respond(200, {'rev': rev, 'net': net, 'years': years})
-                    else:
-                        self.respond(200, {'rev': [], 'net': [], 'years': []})
-                except:
+            try:
+                urls = [
+                    f'https://query1.finance.yahoo.com/v10/finance/quoteSummary/{urllib.request.quote(ticker)}?modules=incomeStatementHistory',
+                    f'https://query2.finance.yahoo.com/v10/finance/quoteSummary/{urllib.request.quote(ticker)}?modules=incomeStatementHistory',
+                ]
+                data = None
+                for url in urls:
+                    try:
+                        req = urllib.request.Request(url, headers={
+                            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                            'Accept': 'application/json',
+                            'Referer': 'https://finance.yahoo.com/',
+                        })
+                        with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
+                            raw = resp.read()
+                            try: text = gzip.decompress(raw).decode('utf-8')
+                            except: text = raw.decode('utf-8')
+                            data = json.loads(text)
+                            if data.get('quoteSummary',{}).get('result'):
+                                break
+                    except:
+                        continue
+                if data:
+                    stmts = data['quoteSummary']['result'][0]['incomeStatementHistory']['incomeStatementHistory']
+                    rev, net, years = [], [], []
+                    for s in reversed(stmts):
+                        years.append(datetime.fromtimestamp(s['endDate']['raw']).year)
+                        rev.append((s.get('totalRevenue',{}).get('raw',0) or 0)/1e9)
+                        net.append((s.get('netIncome',{}).get('raw',0) or 0)/1e9)
+                    self.respond(200, {'rev': rev, 'net': net, 'years': years})
+                else:
                     self.respond(200, {'rev': [], 'net': [], 'years': []})
+            except:
+                self.respond(200, {'rev': [], 'net': [], 'years': []})
 
         elif parsed.path == '/news':
             self.respond(200, NEWS_CACHE[:50])
