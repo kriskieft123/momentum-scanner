@@ -165,12 +165,21 @@ def pt_auto_trade(ticker,score,koers,trend_delta,trend_crossed,pos52,sma200_risi
             if open_pos<10:
                 bedrag=PT_BUDGET/10; aandelen=int(bedrag/koers)
                 if aandelen>=1:
-                    pos={'ticker':ticker,'aankoopKoers':koers,'aankoopDatum':today,'aandelen':aandelen,'aankoopScore':score,'open':True}
+                    # Optie 1: auto houd-vast als score >100 + positie sterk
+                    auto_hv = score > 100 and (pos52 is None or pos52 > 30) and sma200_rising is not False
+                    pos={'ticker':ticker,'aankoopKoers':koers,'aankoopDatum':today,'aandelen':aandelen,'aankoopScore':score,'open':True,'houdVast':auto_hv}
                     pt['posities'].append(pos)
-                    pt['log'].insert(0,{'datum':today,'type':'koop','ticker':ticker,'koers':koers,'aandelen':aandelen,'score':score})
+                    pt['log'].insert(0,{'datum':today,'type':'koop','ticker':ticker,'koers':koers,'aandelen':aandelen,'score':score,'houdVast':auto_hv})
                     save_pt(pt)
-                    send_telegram(f'🟢 PAPIER KOOP: {ticker}\nScore: {score}\nKoers: {koers}\nAandelen: {aandelen}')
-    if ticker in HOUD_VAST_TICKERS:
+                    hv_txt = '\n📌 AUTO HOUD-VAST ingesteld' if auto_hv else ''
+                    send_telegram(f'🟢 PAPIER KOOP: {ticker}\nScore: {score}\nKoers: {koers}\nAandelen: {aandelen}{hv_txt}')
+                    # Sync houd-vast naar bestand
+                    if auto_hv:
+                        HOUD_VAST_TICKERS.add(ticker)
+                        save_houd_vast(HOUD_VAST_TICKERS)
+    # Check houd-vast: zowel via globale lijst als via positie-flag
+    pos_hv_flags = {p['ticker']:p.get('houdVast',False) for p in pt.get('posities',[]) if p.get('open')}
+    if ticker in HOUD_VAST_TICKERS or pos_hv_flags.get(ticker,False):
         for pos in pt['posities']:
             if pos['ticker']==ticker and pos['open']:
                 if sma200_rising is not None and not sma200_rising:
