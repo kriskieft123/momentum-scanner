@@ -84,6 +84,25 @@ def yahoo_fetch(ticker, rng='1y'):
         except: continue
     raise Exception('Yahoo fetch mislukt')
 
+def bereken_markt_gezondheid(scores):
+    """Bepaal markt status op basis van lijst van (ticker, score, d2) tuples"""
+    if len(scores) < 10:
+        return 'onbekend'
+    dalers = sum(1 for _,_,d2 in scores if d2 is not None and d2 < 0)
+    breadth_pct = dalers / len(scores) * 100
+    gem_score = sum(s for _,s,_ in scores if s is not None) / len(scores)
+    gem_d2 = sum(d2 for _,_,d2 in scores if d2 is not None) / max(1, sum(1 for _,_,d2 in scores if d2 is not None))
+    snel_dalers = sum(1 for _,_,d2 in scores if d2 is not None and d2 < -3)
+    snel_pct = snel_dalers / len(scores) * 100
+
+    if breadth_pct >= 80 and gem_d2 < -1.5 or snel_pct >= 40:
+        return 'crash'
+    elif breadth_pct >= 70 or gem_d2 < -1:
+        return 'waarschuwing'
+    elif breadth_pct >= 50:
+        return 'voorzichtig'
+    return 'gezond'
+
 def get_score_and_price(ticker):
     data = yahoo_fetch(ticker, '1y')
     result = data['chart']['result'][0]
@@ -152,14 +171,14 @@ def beurs_open_voor(ticker):
     if ticker.endswith('.AS') or ticker.endswith('.DE'): return is_aex_open()
     return is_nyse_open()
 
-def pt_auto_trade(ticker,score,koers,trend_delta,trend_crossed,pos52,sma200_rising):
+def pt_auto_trade(ticker,score,koers,trend_delta,trend_crossed,pos52,sma200_rising,markt_ok=True):
     pt=load_pt()
     if not pt.get('active'): return
     today=datetime.utcnow().strftime('%Y-%m-%d')
     trend_ok=trend_crossed or (trend_delta is not None and trend_delta>0)
     pos52_ok=pos52 is None or pos52>40
     sma200_ok=sma200_rising is None or sma200_rising
-    if score>100 and trend_ok and pos52_ok and sma200_ok:
+    if score>100 and trend_ok and pos52_ok and sma200_ok and markt_ok:  # markt_ok blokkeert bij crash
         al_bezit=any(p['ticker']==ticker and p['open'] for p in pt['posities'])
         if not al_bezit:
             open_pos=len([p for p in pt['posities'] if p['open']])
@@ -263,25 +282,56 @@ def news_loop():
 
 def monitor_loop():
     print('Monitor loop gestart'); sent=load_sent()
+    markt_status='onbekend'
+    scores_deze_ronde=[]
     while True:
         try:
             if is_beurstijd():
                 today=datetime.utcnow().strftime('%Y-%m-%d')
+                scores_deze_ronde=[]
                 for ticker in WATCHLIST:
                     try:
                         score,koers,trend_delta,trend_crossed,pos52,sma200_rising=get_score_and_price(ticker)
                         if score is None: time.sleep(2); continue
+
+                        # Voeg toe aan markt health berekening
+                        try:
+                            data=yahoo_fetch(ticker,'5d')
+                            r=data['chart']['result'][0]
+                            cls=[v for v in r['indicators']['quote'][0]['close'] if v is not None]
+                            d2=((cls[-1]-cls[-3])/cls[-3]*100) if len(cls)>=3 else None
+                            scores_deze_ronde.append((ticker,score,d2))
+                        except: scores_deze_ronde.append((ticker,score,None))
+
+                        # Bereken markt gezondheid na elke 10 aandelen
+                        if len(scores_deze_ronde)%10==0 and len(scores_deze_ronde)>=10:
+                            nieuwe_status=bereken_markt_gezondheid(scores_deze_ronde)
+                            if nieuwe_status!=markt_status:
+                                print(f'Markt status: {markt_status} → {nieuwe_status}')
+                                if nieuwe_status in ['crash','waarschuwing'] and markt_status not in ['crash','waarschuwing']:
+                                    dalers=sum(1 for _,_,d2 in scores_deze_ronde if d2 is not None and d2<0)
+                                    pct=round(dalers/len(scores_deze_ronde)*100)
+                                    send_telegram(f'💀 MARKT ALARM: {nieuwe_status.upper()}\n{pct}% van watchlist daalt\n⛔ Nieuwe aankopen gestopt!')
+                                elif nieuwe_status in ['gezond','voorzichtig'] and markt_status in ['crash','waarschuwing']:
+                                    send_telegram(f'✅ MARKT HERSTELD: {nieuwe_status}\nNieuwe aankopen weer toegestaan.')
+                                markt_status=nieuwe_status
+
                         beurs_open=beurs_open_voor(ticker)
+
+                        # Blokkeer nieuwe aankopen bij crash of waarschuwing
+                        markt_ok = markt_status not in ['crash','waarschuwing']
+
                         if score>100 and beurs_open:
                             key=f'{ticker}-buy-{today}'
                             if key not in sent:
                                 ti='\n⭐ Drempel gekruist!' if trend_crossed else (f'\nTrend: {("+" if trend_delta>0 else "")}{round(trend_delta,1)}' if trend_delta else '')
-                                if send_telegram(f'🟢 KOOPSIGNAAL: {ticker}\nScore: {score}\nKoers: {koers}{ti}'): sent.add(key); save_sent(sent)
+                                markt_waarsch='' if markt_ok else f'\n⚠️ Markt: {markt_status} — overweeg te wachten'
+                                if send_telegram(f'🟢 KOOPSIGNAAL: {ticker}\nScore: {score}\nKoers: {koers}{ti}{markt_waarsch}'): sent.add(key); save_sent(sent)
                         elif score<60 and ticker in AEX and is_aex_open():
                             key=f'{ticker}-sell-{today}'
                             if key not in sent:
                                 if send_telegram(f'📉 {"VERKOOPSIGNAAL" if score<50 else "WAARSCHUWING"}: {ticker}\nScore: {score}\nKoers: {koers}'): sent.add(key); save_sent(sent)
-                        if beurs_open: pt_auto_trade(ticker,score,koers,trend_delta,trend_crossed,pos52,sma200_rising)
+                        if beurs_open: pt_auto_trade(ticker,score,koers,trend_delta,trend_crossed,pos52,sma200_rising,markt_ok)
                         time.sleep(3)
                     except Exception as e: print(f'Fout {ticker}: {e}'); time.sleep(3)
             else: print(f'Gesloten: {datetime.utcnow().strftime("%H:%M UTC")}')
