@@ -31,6 +31,7 @@ AEX = ['ASML.AS','SHELL.AS','INGA.AS','HEIA.AS','ADYEN.AS','PHIA.AS','ASRNL.AS',
        'ABN.AS','AGN.AS','AD.AS','AKZA.AS','BESI.AS','DSFIR.AS','EXO.AS','HLAG.DE',
        'IMCD.AS','KPN.AS','MT.AS','NN.AS','RAND.AS','REN.AS','PRX.AS','UNA.AS','VPK.AS','WKL.AS']
 PT_BUDGET = 10000
+PT_MAX_POSITIES = 25  # verhoogd van 10 naar 25
 
 def load_houd_vast():
     try:
@@ -162,8 +163,8 @@ def pt_auto_trade(ticker,score,koers,trend_delta,trend_crossed,pos52,sma200_risi
         al_bezit=any(p['ticker']==ticker and p['open'] for p in pt['posities'])
         if not al_bezit:
             open_pos=len([p for p in pt['posities'] if p['open']])
-            if open_pos<10:
-                bedrag=PT_BUDGET/10; aandelen=int(bedrag/koers)
+            if open_pos<PT_MAX_POSITIES:
+                bedrag=PT_BUDGET/PT_MAX_POSITIES; aandelen=int(bedrag/koers)
                 if aandelen>=1:
                     # Optie 1: auto houd-vast als score >100 + positie sterk
                     auto_hv = score > 100 and (pos52 is None or pos52 > 30) and sma200_rising is not False
