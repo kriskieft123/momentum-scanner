@@ -84,6 +84,26 @@ def yahoo_fetch(ticker, rng='1y'):
         except: continue
     raise Exception('Yahoo fetch mislukt')
 
+def bereken_relatieve_sterkte(scores_list):
+    """Relatieve sterkte drempel op basis van alle scores"""
+    if len(scores_list) < 10:
+        return None
+    scores = [s for _,s,_ in scores_list if s is not None]
+    if not scores:
+        return None
+    gem = sum(scores)/len(scores)
+    sd = (sum((s-gem)**2 for s in scores)/len(scores))**0.5
+    gesorteerd = sorted(scores, reverse=True)
+    top20 = gesorteerd[int(len(gesorteerd)*0.20)]
+    sterk_drempel = max(100, gem + 1.5*sd)
+    return {'gem':round(gem,1), 'sd':round(sd,1), 'top20':round(top20,1), 'sterk_drempel':round(sterk_drempel,1)}
+
+def is_relatief_sterk(score, rs_data):
+    """Top 20% en boven gem+1.5sd"""
+    if not rs_data:
+        return True
+    return score >= rs_data['top20'] and score >= rs_data['sterk_drempel']
+
 def bereken_markt_gezondheid(scores):
     """Bepaal markt status op basis van lijst van (ticker, score, d2) tuples"""
     if len(scores) < 10:
@@ -171,14 +191,14 @@ def beurs_open_voor(ticker):
     if ticker.endswith('.AS') or ticker.endswith('.DE'): return is_aex_open()
     return is_nyse_open()
 
-def pt_auto_trade(ticker,score,koers,trend_delta,trend_crossed,pos52,sma200_rising,markt_ok=True):
+def pt_auto_trade(ticker,score,koers,trend_delta,trend_crossed,pos52,sma200_rising,markt_ok=True,rel_sterk=True):
     pt=load_pt()
     if not pt.get('active'): return
     today=datetime.utcnow().strftime('%Y-%m-%d')
     trend_ok=trend_crossed or (trend_delta is not None and trend_delta>0)
     pos52_ok=pos52 is None or pos52>40
     sma200_ok=sma200_rising is None or sma200_rising
-    if score>100 and trend_ok and pos52_ok and sma200_ok and markt_ok:  # markt_ok blokkeert bij crash
+    if score>100 and trend_ok and pos52_ok and sma200_ok and markt_ok and rel_sterk:
         al_bezit=any(p['ticker']==ticker and p['open'] for p in pt['posities'])
         if not al_bezit:
             open_pos=len([p for p in pt['posities'] if p['open']])
@@ -321,17 +341,22 @@ def monitor_loop():
                         # Blokkeer nieuwe aankopen bij crash of waarschuwing
                         markt_ok = markt_status not in ['crash','waarschuwing']
 
+                        # Relatieve sterkte check
+                        rs_data = bereken_relatieve_sterkte(scores_deze_ronde) if len(scores_deze_ronde)>=10 else None
+                        rel_sterk = is_relatief_sterk(score, rs_data) if rs_data else True
+
                         if score>100 and beurs_open:
                             key=f'{ticker}-buy-{today}'
                             if key not in sent:
                                 ti='\n⭐ Drempel gekruist!' if trend_crossed else (f'\nTrend: {("+" if trend_delta>0 else "")}{round(trend_delta,1)}' if trend_delta else '')
-                                markt_waarsch='' if markt_ok else f'\n⚠️ Markt: {markt_status} — overweeg te wachten'
-                                if send_telegram(f'🟢 KOOPSIGNAAL: {ticker}\nScore: {score}\nKoers: {koers}{ti}{markt_waarsch}'): sent.add(key); save_sent(sent)
+                                rs_txt=f'\n📊 Top 20% watchlist (RS drempel: {rs_data["sterk_drempel"] if rs_data else "?"})' if rel_sterk else ''
+                                markt_waarsch='' if markt_ok else f'\n⚠️ Markt: {markt_status}'
+                                if send_telegram(f'🟢 KOOPSIGNAAL: {ticker}\nScore: {score}\nKoers: {koers}{ti}{rs_txt}{markt_waarsch}'): sent.add(key); save_sent(sent)
                         elif score<60 and ticker in AEX and is_aex_open():
                             key=f'{ticker}-sell-{today}'
                             if key not in sent:
                                 if send_telegram(f'📉 {"VERKOOPSIGNAAL" if score<50 else "WAARSCHUWING"}: {ticker}\nScore: {score}\nKoers: {koers}'): sent.add(key); save_sent(sent)
-                        if beurs_open: pt_auto_trade(ticker,score,koers,trend_delta,trend_crossed,pos52,sma200_rising,markt_ok)
+                        if beurs_open: pt_auto_trade(ticker,score,koers,trend_delta,trend_crossed,pos52,sma200_rising,markt_ok,rel_sterk)
                         time.sleep(3)
                     except Exception as e: print(f'Fout {ticker}: {e}'); time.sleep(3)
             else: print(f'Gesloten: {datetime.utcnow().strftime("%H:%M UTC")}')
@@ -430,3 +455,4 @@ if __name__=='__main__':
     server=HTTPServer(('0.0.0.0',PORT),Handler)
     print(f"Server op port {PORT} | Telegram: {'Actief' if TG_TOKEN else 'Uit'} | Houd-vast: {HOUD_VAST_TICKERS}")
     server.serve_forever()
+
